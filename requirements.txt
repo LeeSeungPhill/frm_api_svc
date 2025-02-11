@@ -7,7 +7,7 @@ bcrypt==3.2.0
 pyupbit==0.2.34
 beautifulsoup4==4.8.2
 bs4==0.0.1
-matplotlib==3.1.2
 webdriver-manager==4.0.2
 selenium==4.27.1
 ccxt
+matplotlib
