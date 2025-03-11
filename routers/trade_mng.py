@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from config import db as config
-from models.trade_mng import dividion_sell, dividion_buy, open_order, cancel_order, close_order, account_list, TradeResponse, SellResponse, BalanceResponse, OrderResponse, trade_plan
+from models.trade_mng import dividion_sell, dividion_buy, open_order, cancel_order, close_order, account_list, TradeResponse, SellResponse, BalanceResponse, OrderResponse, trade_plan, TradePlanResponse
 from services import cust_mng_service
 
 from datetime import date, datetime, timedelta
@@ -68,7 +68,7 @@ def account_list(trade_mng: account_list, db: Session = Depends(config.get_db)):
         raise HTTPException(status_code=400, detail="Cust Info Already Registered")
 
 # 매매 계획
-@router.post("/trade_plan", response_model=BalanceResponse)
+@router.post("/trade_plan", response_model=TradePlanResponse)
 def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
     try:
         # 고객명에 의한 고객정보 조회
@@ -79,50 +79,66 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
         # secret_key
         secret_key = cust_info[5]
 
-        # 업비트 거래소 초기화
-        exchange = ccxt.upbit({
-            'apiKey': access_key,
-            'secret': secret_key
-        })
+        plan_list = []
 
-        # 잔고조회
-        raw_balance_list = balance(access_key, secret_key, plan.market_name)
+        # 매수수량 계산 : B1 분할정액 매수, B2 손실율 매수
+        if plan.plan_tp == 'B':
+            buy_division_amt_except_fee = (int(plan.plan_tot_amt) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+            # 분할 매수 수량
+            plan_vol = (buy_division_amt_except_fee / plan.plan_price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+            
+            # 매매예정금액
+            plan_amt = int(plan.plan_price * plan_vol)
 
-        for item in raw_balance_list:
-            if plan.prd_nm == item["name"]:
-                # 매매예정 구분
-                # B1:분할정액매수
-                # B2:손실율매수
-                # S1:안전마진매도
-                # S2:저항대도달매도
-                # S3:지지대이탈매도
-                # S4:시장추세 및 전일저가금일종가 이탈매도
-                # S5:시장주도주 및 시장추세 비동행 이탈매도
-                
-                # 매매예정 수량
-                # B1:분할정액금액/매수가
-                # B2:투자갯수당 손실금액/(매수가-지지가)
-                # S1:보유수량 > 손실금액/(저항가-지지가) -> 손실금액/(저항가-지지가) else 보유수량
-                # S2:저항가 보유수량
-                # S3:지지가 보유수량
-                # S4:시장추세 및 전일저가금일종가 이탈(상승추세:보유물량20%, 횡보추세:보유물량40%, 하락추세:보유물량60%)
-                # S5:시장주도주 및 시장추세 비동행 이탈(상승추세:보유물량10%, 횡보추세:보유물량20%, 하락추세:보유물량30%)
-                
-                # 매매예정 수량 계산
-                if plan.plan_tp == 'B1':
-                    buy_division_amt_except_fee = (int(plan.plan_tot_amt) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
-                    # 분할 매수 수량
-                    plan_vol = (buy_division_amt_except_fee / plan.plan_price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+            plan_param = {
+                "cust_nm": cust_info[1],
+                "market_name": plan.market_name,
+                "prd_nm": plan.prd_nm, 
+                "price": 0, 
+                "volume": 0,
+                "plan_tp": "B1",
+                "plan_price": plan.plan_price,
+                "plan_vol": plan_vol,
+                "plan_amt": plan_amt,
+                "regist_price": plan.regist_price,
+                "support_price": plan.support_price,
+            }
 
-                elif plan.plan_tp == 'B2':
-                    buy_division_amt_except_fee = (int(plan.plan_tot_amt) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
-                    # 손실금액(종목당 손실금액)
-                    # cut_amt = int(buy_division_amt_except_fee * (100 - (plan.support_price / plan.plan_price) * 100) / 100)
-                    cut_amt = 50000
-                    # 손실율 매수 수량
-                    plan_vol = cut_amt / (plan.plan_price - plan.support_price)
+            plan_list.append(plan_param)
 
-                elif plan.plan_tp == 'S1':
+            # 손실금액(종목당 손실금액)
+            # cut_amt = int(buy_division_amt_except_fee * (100 - (plan.support_price / plan.plan_price) * 100) / 100)
+            cut_amt = 50000
+            # 손실율 매수 수량
+            plan_vol = cut_amt / (plan.plan_price - plan.support_price)
+
+            # 매매예정금액
+            plan_amt = int(plan.plan_price * plan_vol)
+
+            plan_param = {
+                "cust_nm": cust_info[1],
+                "market_name": plan.market_name,
+                "prd_nm": plan.prd_nm, 
+                "price": 0, 
+                "volume": 0,
+                "plan_tp": "B2",
+                "plan_price": plan.plan_price,
+                "plan_vol": plan_vol,
+                "plan_amt": plan_amt,
+                "regist_price": plan.regist_price,
+                "support_price": plan.support_price,
+            }
+
+            plan_list.append(plan_param)
+
+        # 매도수량 계산 : S1 안전마진 매도, S2 저항대도달 및 지지대이탈 매도
+        elif plan.plan_tp == 'S':
+            # 잔고조회
+            raw_balance_list = balance(access_key, secret_key, plan.market_name)
+
+            for item in raw_balance_list:
+                if plan.prd_nm[4:] == item["name"]:
+                    
                     # 손실금액
                     cut_amt = abs(int(item["amt"] * (100 - (plan.support_price / Decimal(item["price"])) * 100) / 100))
                     # 안전마진 매도 수량
@@ -131,147 +147,66 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
                     if item["volume"] < plan_vol:
                         plan_vol = item["volume"]
 
-                elif plan.plan_tp == 'S2' or plan.plan_tp == 'S3':
+                    # 매매예정금액
+                    plan_amt = int(plan.plan_price * plan_vol)
+
+                    plan_param = {
+                        "cust_nm": cust_info[1],
+                        "market_name": plan.market_name,
+                        "prd_nm": plan.prd_nm, 
+                        "price": item["price"], 
+                        "volume": item["volume"],
+                        "plan_tp": "S1",
+                        "plan_price": plan.plan_price,
+                        "plan_vol": plan_vol,
+                        "plan_amt": plan_amt,
+                        "regist_price": plan.regist_price,
+                        "support_price": plan.support_price,
+                    }
+
+                    plan_list.append(plan_param)
+
                     plan_vol = item["volume"]
 
-                elif plan.plan_tp == 'S4': 
-                    market = "BTC/KRW"
-                    timeframe_10m = "10m"  # 10분봉 데이터
-                    timeframe_1d = "1d"    # 일봉 데이터
-                    timezone = pytz.timezone('Asia/Seoul')
-                    end_time = datetime.now(timezone)
+                    # 매매예정금액
+                    plan_amt = int(plan.plan_price * Decimal(plan_vol))
 
-                    # 200일 전부터 전일까지의 시작 및 종료 시점 계산
-                    start_of_period = end_time - timedelta(days=200)  # 200일 전
-                    start_of_period = timezone.localize(datetime(start_of_period.year, start_of_period.month, start_of_period.day))  # 200일 전 00:00
-                    end_of_yesterday = datetime(end_time.year, end_time.month, end_time.day, tzinfo=timezone) - timedelta(seconds=1)
+                    plan_param = {
+                        "cust_nm": cust_info[1],
+                        "market_name": plan.market_name,
+                        "prd_nm": plan.prd_nm, 
+                        "price": item["price"], 
+                        "volume": item["volume"],
+                        "plan_tp": "S2",
+                        "plan_price": plan.plan_price,
+                        "plan_vol": plan_vol,
+                        "plan_amt": plan_amt,
+                        "regist_price": plan.regist_price,
+                        "support_price": plan.support_price,
+                    }
 
-                    # 200일부터 전일까지의 일봉 데이터 가져오기
-                    since = int(start_of_period.timestamp() * 1000)
-                    ohlcv_1d = exchange.fetch_ohlcv(market, timeframe=timeframe_1d, since=since)
-                    df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_1d['timestamp'] = pd.to_datetime(df_1d['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Seoul')
+                    plan_list.append(plan_param)
+                
+        # 매매예정정보 백업 및 생성
+        create_trade_plan(plan_list, db)
 
-                    # 200일부터 전일까지의 데이터 필터링 (혹시 불필요한 데이터가 포함될 경우 대비)
-                    df_1d = df_1d[(df_1d['timestamp'] >= start_of_period) & (df_1d['timestamp'] <= end_of_yesterday)]
-
-                    # 10분봉 데이터 가져오기
-                    ohlcv_10m = exchange.fetch_ohlcv(item['name']+"/KRW", timeframe=timeframe_10m, limit=200)
-                    df_10m = pd.DataFrame(ohlcv_10m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df_10m['timestamp'] = pd.to_datetime(df_10m['timestamp'], unit='ms', utc=True).dt.tz_convert('Asia/Seoul')
-
-                    # 전일 시작 및 종료 시점 계산
-                    start_of_yesterday = (datetime(end_time.year, end_time.month, end_time.day, 9, 0, 0, tzinfo=timezone) - timedelta(days=1))
-                    end_of_yesterday = start_of_yesterday + timedelta(days=1, hours=23, minutes=59, seconds=59)
-
-                    # 전일 데이터 필터링
-                    yesterday_data = df_10m[(df_10m['timestamp'] >= start_of_yesterday) & (df_10m['timestamp'] <= end_of_yesterday)]
-                    
-                    if not yesterday_data.empty:
-                        yesterday_low = yesterday_data['low'].min()  # 전일 저가
-
-                        # 금일 종가 추출
-                        today_data = df_10m[df_10m['timestamp'] == df_10m['timestamp'].max()]  # 금일 가장 최근 데이터
-                        if not today_data.empty:
-                            today_close = today_data['close'].values[0]  # 금일 종가
-
-                            # 전일 저가 이탈 여부 체크
-                            if today_close < yesterday_low:
-                                # 고점/저점 계산, 추세 판단
-                                df_1d = calculate_peaks_and_troughs(df_1d)
-                                df_1d = determine_trends(df_1d)
-
-                                for _, row in df_1d.iterrows():
-                                    trend = row['Trend']
-
-                                # 시장추세 및 전일저가금일종가 이탈(상승추세:보유물량20%, 횡보추세:보유물량40%, 하락추세:보유물량60%)
-                                if trend == 'Uptrend':
-                                    plan_vol = item["volume"] * 0.2
-                                elif trend == 'Downtrend':
-                                    plan_vol = item["volume"] * 0.6
-                                else:
-                                    plan_vol = item["volume"] * 0.4    
-                            else:
-                                plan_vol = 0
-                        else:
-                            plan_vol = 0
-                    else:
-                        plan_vol = 0
-
-                # 매매예정금액
-                plan_amt = int(plan.plan_price * plan_vol)
-
-                # 매매예정정보 생성
-                INSERT_TRADE_PLAN = """
-                    INSERT INTO trade_plan (
-                        cust_nm, 
-                        market_name, 
-                        prd_nm, 
-                        price, 
-                        volume, 
-                        plan_tp,
-                        plan_price,
-                        plan_vol,
-                        plan_amt,
-                        regist_price,
-                        support_price,
-                        regr_id, 
-                        reg_date, 
-                        chgr_id, 
-                        chg_date)
-                    VALUES (
-                        :cust_nm, 
-                        :market_name, 
-                        :prd_nm,
-                        :price,
-                        :volume,
-                        :plan_tp,
-                        :plan_price,
-                        :plan_vol,
-                        :plan_amt,
-                        :regist_price,
-                        :support_price,
-                        :regr_id,
-                        :reg_date,
-                        :chgr_id,
-                        :chg_date)
-                """
-                db.execute(text(INSERT_TRADE_PLAN), {
-                    "cust_nm": plan.cust_nm, 
-                    "market_name": plan.market_name, 
-                    "prd_nm": plan.prd_nm, 
-                    "price": item["price"], 
-                    "volume": item["volume"],
-                    "plan_tp": plan.plan_tp,
-                    "plan_price": plan.plan_price,
-                    "plan_vol": plan_vol,
-                    "plan_amt": plan_amt,
-                    "regist_price": plan.regist_price,
-                    "support_price": plan.support_price,
-                    "regr_id": user_id,
-                    "reg_date": datetime.now(),
-                    "chgr_id": user_id,
-                    "chg_date": datetime.now()
-                    })
-                db.commit()
-
-        balance_list = {"balance_list": [
+        trade_plan_list = {"trade_plan_list": [
                 {
-                    "name": item["name"],
+                    "market_name": item["market_name"],
+                    "prd_nm": item["prd_nm"],
                     "price": item["price"],
                     "volume": item["volume"],
-                    "amt": item["amt"],
-                    "locked_volume" : item['locked_volume'],
-                    "locked_amt" : item['locked_amt'],
-                    "trade_price": item["trade_price"],
-                    "current_amt": item["current_amt"],
-                    "loss_profit_amt": item["loss_profit_amt"],
-                    "loss_profit_rate": item["loss_profit_rate"]
+                    "plan_tp" : item['plan_tp'],
+                    "plan_price" : item['plan_price'],
+                    "plan_vol": Decimal(str(item["plan_vol"])).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN),
+                    "plan_amt": item["plan_amt"],
+                    "regist_price": item["regist_price"],
+                    "support_price": item["support_price"]
                 }
-            for item in raw_balance_list
+            for item in plan_list
         ]}
 
-        return balance_list
+        return trade_plan_list
 
     except ValueError:
         raise HTTPException(status_code=400, detail="Cust Info Already Registered")
@@ -1322,6 +1257,84 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                     db.commit()
         
     return OrderResponse(order_list=order_list)
+
+def create_trade_plan(plan_list, db: Session = Depends(config.get_db)):
+
+    try:
+        for plan in plan_list:
+            params = {
+                "cust_nm": plan['cust_nm'], 
+                "market_name": plan['market_name'], 
+                "prd_nm": plan['prd_nm'], 
+                "plan_tp": plan['plan_tp'],
+                "plan_dtm": datetime.now().strftime('%Y%m%d%H%M%S'), 
+                "price": plan["price"], 
+                "volume": plan["volume"],
+                "plan_price": plan['plan_price'],
+                "plan_vol": plan['plan_vol'],
+                "plan_amt": plan['plan_amt'],
+                "regist_price": plan['regist_price'],
+                "support_price": plan['support_price'],
+                "regr_id": user_id,
+                "reg_date": datetime.now(),
+                "chgr_id": user_id,
+                "chg_date": datetime.now()
+            }
+
+            # 기존 데이터 백업
+            INSERT_TRADE_PLAN_HIST = text("""
+                INSERT INTO trade_plan_hist (
+                    cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                    plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                    regr_id, reg_date, chgr_id, chg_date
+                )
+                SELECT cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                       plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                       regr_id, reg_date, chgr_id, chg_date
+                FROM trade_plan
+                WHERE cust_nm = :cust_nm 
+                AND market_name = :market_name
+                AND prd_nm = :prd_nm 
+                AND plan_tp = :plan_tp
+            """)
+            
+            result1 = db.execute(INSERT_TRADE_PLAN_HIST, params)
+
+            # 백업이 성공한 경우에만 삭제
+            if result1.rowcount > 0:
+                DELETE_TRADE_PLAN = text("""
+                    DELETE FROM trade_plan
+                    WHERE cust_nm = :cust_nm 
+                    AND market_name = :market_name
+                    AND prd_nm = :prd_nm 
+                    AND plan_tp = :plan_tp
+                """)
+                db.execute(DELETE_TRADE_PLAN, params)
+
+            # 새로운 데이터 삽입 (중복 방지 포함)
+            INSERT_TRADE_PLAN = text("""
+                INSERT INTO trade_plan (
+                    cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                    plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                    regr_id, reg_date, chgr_id, chg_date
+                )
+                SELECT :cust_nm, :market_name, :plan_dtm, 'N', :prd_nm, :price, :volume, 
+                       :plan_tp, :plan_price, :plan_vol, :plan_amt, :regist_price, 
+                       :support_price, :regr_id, :reg_date, :chgr_id, :chg_date
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM trade_plan 
+                    WHERE cust_nm = :cust_nm 
+                    AND market_name = :market_name
+                    AND prd_nm = :prd_nm 
+                    AND plan_tp = :plan_tp
+                );
+            """)
+            db.execute(INSERT_TRADE_PLAN, params)
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise e
 
 def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
 

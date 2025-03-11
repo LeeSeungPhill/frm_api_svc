@@ -51,6 +51,18 @@ class BalanceInfo(BaseModel):
     loss_profit_amt: Optional[int] = Field(None, description="손실수익금")
     loss_profit_rate: Optional[Decimal] = Field(None, description="손실수익률")
 
+class TradePlanInfo(BaseModel):
+    market_name: Optional[str] = Field(None, description="거래소명")
+    prd_nm: Optional[str] = Field(None, description="상품명")
+    price: Optional[Decimal] = Field(None, description="보유가")
+    volume: Optional[Decimal] = Field(None, description="보유수량")
+    plan_tp: Optional[str] = Field(None, description="매매예정구분")
+    plan_price: Optional[Decimal] = Field(None, description="매매예정가")
+    plan_vol: Optional[Decimal] = Field(None, description="매매예정수량")
+    plan_amt: Optional[int] = Field(None, description="매매예정금액")
+    support_price: Optional[Decimal] = Field(None, description="지지가")
+    regist_price: Optional[Decimal] = Field(None, description="저항가")   
+
 class dividion_sell(BaseModel):
     cust_nm: Optional[str] = Field(None, description="고객명")
     market_name: Optional[str] = Field(None, description="거래소명")
@@ -103,6 +115,9 @@ class SellResponse(BaseModel):
 
 class BalanceResponse(BaseModel):
     balance_list: Optional[List[BalanceInfo]] = Field(None, description="잔고정보")
+
+class TradePlanResponse(BaseModel):
+    trade_plan_list: Optional[List[TradePlanInfo]] = Field(None, description="매매예정정보")
 
 class OrderInfo(BaseModel):
     ord_dtm : Optional[str] = Field(None, description="주문일시")
