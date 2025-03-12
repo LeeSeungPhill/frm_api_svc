@@ -148,7 +148,7 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
                         plan_vol = item["volume"]
 
                     # 매매예정금액
-                    plan_amt = int(plan.plan_price * plan_vol)
+                    plan_amt = int(plan.plan_price * Decimal(plan_vol))
 
                     plan_param = {
                         "cust_nm": cust_info[1],
