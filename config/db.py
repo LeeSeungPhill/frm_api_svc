@@ -3,7 +3,7 @@ from sqlalchemy.ext.declarative import DeclarativeMeta, declarative_base
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
-DATABASE_URL = "postgresql://postgres:asdf1234@localhost/kis"
+DATABASE_URL = "postgresql://postgres:asdf1234@192.168.50.248:5432/universe"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
