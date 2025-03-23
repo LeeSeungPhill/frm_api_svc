@@ -4,7 +4,7 @@ from config import db as config
 from models.trade_mng import dividion_sell, dividion_buy, open_order, cancel_order, close_order, account_list, TradeResponse, SellResponse, BalanceResponse, OrderResponse, trade_plan, TradePlanResponse
 from services import cust_mng_service
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timezone
 from sqlalchemy import text
 from config.db import get_db
 
@@ -1466,6 +1466,10 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
                         # 거래량이 전일보다 많은 경우
                         if trade_volume > result[0]['trade_volume']:
                             print("name : ",item['currency'],"거래량 : ",trade_volume, "전일 거래량 : ",result[0]['trade_volume'])
+
+                    is_breakdown = candle_minutes_info("KRW-"+item['currency'], market_name, api_url, "15")
+                    if is_breakdown:
+                        print("name : ", item['currency'], " 의 이전 분봉의 저가를 이탈했습니다.")
                             
                     # 현재평가금액
                     current_amt = int(trade_price * volume)
@@ -1548,6 +1552,66 @@ def candle_info(market, market_name, api_url):
         candle_list.append(candle_param)
     
     return candle_list
+
+def candle_minutes_info(market, market_name, api_url, in_minutes):
+
+    # UTC 시간을 사용
+    now = datetime.now(timezone.utc).isoformat()
+    is_breakdown = False
+
+    if market_name.upper() == 'UPBIT':
+        url = f"{api_url}/v1/candles/minutes/{in_minutes}"
+        
+        params = {  
+            'market': market,  
+            'count': 2,  # 최근 2개 분봉을 가져옴
+            'to': now  
+        } 
+        headers = {"accept": "application/json"}
+
+        try:
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()  # HTTP 오류 처리
+            data = response.json()
+        except requests.RequestException as e:
+            print(f"Error fetching data from Upbit: {e}")
+            return []
+
+        if len(data) < 2:
+            print("Not enough candle data available.")
+            return []
+
+        # 최근 분봉 (현재 캔들)과 이전 분봉
+        current_candle = data[0]
+        previous_candle = data[1]
+
+        # 현재 분봉 종가가 이전 분봉 저가를 이탈했는지와 이전 분봉의 거래량보다 현재 분봉의 거래량이 큰 경우 체크
+        is_breakdown = current_candle["trade_price"] < previous_candle["low_price"] and current_candle["candle_acc_trade_volume"] > previous_candle["candle_acc_trade_volume"]
+
+    elif market_name.upper() == 'BITHUMB':
+        url = f"{api_url}/v1/candles/minutes/{in_minutes}?market={market}&count=2&to={now}"
+        headers = {"accept": "application/json"}
+        
+        try:
+            response = requests.get(url, headers=headers).json()
+            response.raise_for_status()  # HTTP 오류 처리
+            data = response.json()
+        except requests.RequestException as e:
+            print(f"Error fetching data from Upbit: {e}")
+            return []
+
+        if len(data) < 2:
+            print("Not enough candle data available.")
+            return []
+        
+        # 최근 분봉 (현재 캔들)과 이전 분봉
+        current_candle = data[0]
+        previous_candle = data[1]
+
+        # 현재 분봉 종가가 이전 분봉 저가를 이탈했는지와 이전 분봉의 거래량보다 현재 분봉의 거래량이 큰 경우 체크
+        is_breakdown = current_candle["trade_price"] < previous_candle["low_price"] and current_candle["candle_acc_trade_volume"] > previous_candle["candle_acc_trade_volume"]
+    
+    return is_breakdown
 
 def place_order(access_key, secret_key, market, side, volume, price, ord_type="limit"):
     params= {
