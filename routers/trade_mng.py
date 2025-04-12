@@ -1673,7 +1673,7 @@ def candle_minutes_info(market, market_name, api_url, in_minutes):
         headers = {"accept": "application/json"}
         
         try:
-            response = requests.get(url, headers=headers).json()
+            response = requests.get(url, headers=headers)
             response.raise_for_status()  # HTTP 오류 처리
             data = response.json()
         except requests.RequestException as e:
