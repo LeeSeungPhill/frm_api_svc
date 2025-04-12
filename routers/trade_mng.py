@@ -91,6 +91,7 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
             plan_amt = int(plan.plan_price * plan_vol)
 
             plan_param = {
+                "cust_num": cust_info[0],
                 "cust_nm": cust_info[1],
                 "market_name": plan.market_name,
                 "prd_nm": plan.prd_nm, 
@@ -116,6 +117,7 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
             plan_amt = int(plan.plan_price * plan_vol)
 
             plan_param = {
+                "cust_num": cust_info[0],
                 "cust_nm": cust_info[1],
                 "market_name": plan.market_name,
                 "prd_nm": plan.prd_nm, 
@@ -151,6 +153,7 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
                     plan_amt = int(plan.plan_price * Decimal(plan_vol))
 
                     plan_param = {
+                        "cust_num": cust_info[0],
                         "cust_nm": cust_info[1],
                         "market_name": plan.market_name,
                         "prd_nm": plan.prd_nm, 
@@ -172,6 +175,7 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
                     plan_amt = int(plan.plan_price * Decimal(plan_vol))
 
                     plan_param = {
+                        "cust_num": cust_info[0],
                         "cust_nm": cust_info[1],
                         "market_name": plan.market_name,
                         "prd_nm": plan.prd_nm, 
@@ -189,6 +193,9 @@ def order_plan(plan: trade_plan, db: Session = Depends(config.get_db)):
                 
         # 매매예정정보 백업 및 생성
         create_trade_plan(plan_list, db)
+        
+        # 잔고정보 미존재 대상 매매처리된 매매예정정보 백업 처리
+        regist_trade_plan_hist(cust_info[0], cust_info[1], plan.market_name, plan.prd_nm, db)
 
         trade_plan_list = {"trade_plan_list": [
                 {
@@ -1281,60 +1288,133 @@ def create_trade_plan(plan_list, db: Session = Depends(config.get_db)):
                 "chg_date": datetime.now()
             }
 
-            # 기존 데이터 백업
-            INSERT_TRADE_PLAN_HIST = text("""
-                INSERT INTO trade_plan_hist (
-                    cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
-                    plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
-                    regr_id, reg_date, chgr_id, chg_date
-                )
-                SELECT cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
-                       plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
-                       regr_id, reg_date, chgr_id, chg_date
-                FROM trade_plan
+            # 매매예정이력정보 존재여부 체크
+            TRADE_PLAN_HIST = text("""
+                SELECT 1
+                FROM trade_plan_hist
                 WHERE cust_nm = :cust_nm 
                 AND market_name = :market_name
                 AND prd_nm = :prd_nm 
                 AND plan_tp = :plan_tp
+                AND plan_execute = 'N'
+                AND plan_price = :plan_price
+                AND plan_vol = :plan_vol
+                AND plan_amt = :plan_amt
+                AND regist_price = :regist_price
+                AND support_price = :support_price
             """)
             
-            result1 = db.execute(INSERT_TRADE_PLAN_HIST, params)
+            chk_trade_plan_hist = db.execute(TRADE_PLAN_HIST,params).first()
 
-            # 백업이 성공한 경우에만 삭제
-            if result1.rowcount > 0:
-                DELETE_TRADE_PLAN = text("""
-                    DELETE FROM trade_plan
+            if chk_trade_plan_hist is None:
+            
+                # 기존 데이터 백업
+                INSERT_TRADE_PLAN_HIST = text("""
+                    INSERT INTO trade_plan_hist (
+                        cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                        plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                        regr_id, reg_date, chgr_id, chg_date
+                    )
+                    SELECT cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                        plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                        regr_id, reg_date, chgr_id, chg_date
+                    FROM trade_plan
                     WHERE cust_nm = :cust_nm 
                     AND market_name = :market_name
                     AND prd_nm = :prd_nm 
                     AND plan_tp = :plan_tp
+                    AND plan_execute = 'N'                     
                 """)
-                db.execute(DELETE_TRADE_PLAN, params)
+                
+                result1 = db.execute(INSERT_TRADE_PLAN_HIST, params)
 
-            # 새로운 데이터 삽입 (중복 방지 포함)
-            INSERT_TRADE_PLAN = text("""
-                INSERT INTO trade_plan (
-                    cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
-                    plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
-                    regr_id, reg_date, chgr_id, chg_date
-                )
-                SELECT :cust_nm, :market_name, :plan_dtm, 'N', :prd_nm, :price, :volume, 
-                       :plan_tp, :plan_price, :plan_vol, :plan_amt, :regist_price, 
-                       :support_price, :regr_id, :reg_date, :chgr_id, :chg_date
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM trade_plan 
-                    WHERE cust_nm = :cust_nm 
-                    AND market_name = :market_name
-                    AND prd_nm = :prd_nm 
-                    AND plan_tp = :plan_tp
-                );
-            """)
-            db.execute(INSERT_TRADE_PLAN, params)
+                # 백업이 성공한 경우에만 삭제
+                if result1.rowcount > 0:
+                    DELETE_TRADE_PLAN = text("""
+                        DELETE FROM trade_plan
+                        WHERE cust_nm = :cust_nm 
+                        AND market_name = :market_name
+                        AND prd_nm = :prd_nm 
+                        AND plan_tp = :plan_tp
+                        AND plan_execute = 'N'
+                    """)
+                    db.execute(DELETE_TRADE_PLAN, params)
 
+                # 새로운 데이터 삽입 (중복 방지 포함)
+                INSERT_TRADE_PLAN = text("""
+                    INSERT INTO trade_plan (
+                        cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                        plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                        regr_id, reg_date, chgr_id, chg_date
+                    )
+                    SELECT :cust_nm, :market_name, :plan_dtm, 'N', :prd_nm, :price, :volume, 
+                        :plan_tp, :plan_price, :plan_vol, :plan_amt, :regist_price, 
+                        :support_price, :regr_id, :reg_date, :chgr_id, :chg_date
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM trade_plan 
+                        WHERE cust_nm = :cust_nm 
+                        AND market_name = :market_name
+                        AND prd_nm = :prd_nm 
+                        AND plan_tp = :plan_tp
+                        AND plan_execute = 'N'
+                    );
+                """)
+                db.execute(INSERT_TRADE_PLAN, params)
+            
         db.commit()
+            
     except Exception as e:
         db.rollback()
         raise e
+
+def regist_trade_plan_hist(cust_num, cust_nm, market_name, prd_nm, db: Session = Depends(config.get_db)):
+    
+    try:
+        # 잔고정보 미존재 대상 매매처리된 매매예정정보 백업 처리
+        EX_INSERT_TRADE_PLAN_HIST = text("""
+            INSERT INTO trade_plan_hist (
+                cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                regr_id, reg_date, chgr_id, chg_date
+            )
+            SELECT cust_nm, market_name, plan_dtm, plan_execute, prd_nm, price, volume, 
+                plan_tp, plan_price, plan_vol, plan_amt, regist_price, support_price, 
+                regr_id, reg_date, chgr_id, chg_date
+            FROM trade_plan
+            WHERE cust_nm = :cust_nm 
+            AND market_name = :market_name
+            AND prd_nm = :prd_nm 
+            AND plan_execute = 'Y'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM balance_info 
+                WHERE cust_num = :cust_num AND market_name = :market_name AND prd_nm = :prd_nm
+            )                      
+        """)
+        
+        result2 = db.execute(EX_INSERT_TRADE_PLAN_HIST, {"cust_num": cust_num, "cust_nm": cust_nm, "market_name": market_name, "prd_nm": prd_nm,})
+
+        # 백업이 성공한 경우에만 삭제
+        if result2.rowcount > 0:
+            EX_DELETE_TRADE_PLAN = text("""
+                DELETE FROM trade_plan
+                WHERE cust_nm = :cust_nm 
+                AND market_name = :market_name
+                AND prd_nm = :prd_nm 
+                AND plan_execute = 'Y'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM balance_info 
+                    WHERE cust_num = :cust_num AND market_name = :market_name AND prd_nm = :prd_nm
+                )                      
+            """)
+            db.execute(EX_DELETE_TRADE_PLAN, {"cust_num": cust_num, "cust_nm": cust_nm, "market_name": market_name, "prd_nm": prd_nm,})
+            
+        db.commit()
+            
+    except Exception as e:
+        db.rollback()
+        raise e            
 
 def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
 
