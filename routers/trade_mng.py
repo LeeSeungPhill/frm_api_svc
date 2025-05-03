@@ -1419,29 +1419,34 @@ def regist_trade_plan_hist(cust_num, cust_nm, market_name, prd_nm, db: Session =
 def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
 
     api_url = ''
-    if market_name == 'UPBIT':
-        api_url = upbit_api_url
-        payload = {
-            'access_key': access_key,
-            'nonce': str(uuid.uuid4()),
-        }
-    elif market_name == 'BITHUMB':   
-        api_url = bithumb_api_url
-        payload = {
-            'access_key': access_key,
-            'nonce': str(uuid.uuid4()),
-            'timestamp': round(time.time() * 1000)
+    try:
+        if market_name == 'UPBIT':
+            api_url = upbit_api_url
+            payload = {
+                'access_key': access_key,
+                'nonce': str(uuid.uuid4()),
+            }
+        elif market_name == 'BITHUMB':   
+            api_url = bithumb_api_url
+            payload = {
+                'access_key': access_key,
+                'nonce': str(uuid.uuid4()),
+                'timestamp': round(time.time() * 1000)
+            }
+
+        # 잔고 조회
+        jwt_token = jwt.encode(payload, secret_key)
+        authorization = 'Bearer {}'.format(jwt_token)
+        headers = {
+        'Authorization': authorization,
         }
 
-    # 잔고 조회
-    jwt_token = jwt.encode(payload, secret_key)
-    authorization = 'Bearer {}'.format(jwt_token)
-    headers = {
-    'Authorization': authorization,
-    }
-
-    res = requests.get(api_url + '/v1/accounts',headers=headers)
-    accounts = res.json()
+        res = requests.get(api_url + '/v1/accounts',headers=headers)
+        accounts = res.json()
+        
+    except Exception as e:
+        print(f"[잔고 조회 예외] 오류 발생: {e}")
+        accounts = []  # 또는 None 등, 이후 구문에서 사용할 수 있도록 기본값 설정    
 
     currency_list = list()
     cnt_currency = 0
@@ -1458,7 +1463,7 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
         for item in accounts:
             if item['currency'] == prd_nm:
                 price = float(item['avg_buy_price'])  # 평균단가    
-                volume = float(item['balance'])   # 보유수량
+                volume = float(item['balance']) + float(item['locked'])    # 보유수량 = 주문가능 수량 + 주문묶여있는 수량
                 amt = int(price * volume)  # 보유금액  
 
                 params = {
@@ -1470,17 +1475,21 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
                 loss_profit_amt = 0
                 loss_profit_rate = 0
 
-                # 현재가 정보
-                res = requests.get(api_url + "/v1/ticker", params=params).json()
+                try:
+                    # 현재가 정보
+                    res = requests.get(api_url + "/v1/ticker", params=params).json()
 
-                if isinstance(res, dict) and 'error' in res:
-                    # 에러 메시지가 반환된 경우
-                    error_name = res['error'].get('name', 'Unknown')
-                    error_message = res['error'].get('message', 'Unknown')
-                    print(f"Error {error_name}: {error_message}")
-                    print(item['currency'])
+                    if isinstance(res, dict) and 'error' in res:
+                        # 에러 메시지가 반환된 경우
+                        error_name = res['error'].get('name', 'Unknown')
+                        error_message = res['error'].get('message', 'Unknown')
+                        print(f"[Ticker 조회 오류] {error_name}: {error_message}")
 
-                else:
+                except Exception as e:
+                    print(f"[Ticker 조회 예외] 오류 발생: {e}")
+                    res = None 
+                
+                if res:  
                     trade_price = float(res[0]['trade_price'])
                     
                     # 현재평가금액
@@ -1490,29 +1499,29 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
                     # 손실수익률
                     loss_profit_rate = ((100 - Decimal(trade_price / price) * 100) * -1).quantize(Decimal('0.01'), rounding=ROUND_DOWN)
 
-                currency_param = {
-                    "name" : item['currency'],
-                    "price" : price,
-                    "volume" : volume,
-                    "amt" : amt,
-                    "locked_volume" : float(item['locked']),
-                    "locked_amt" : int(price*float(item['locked'])),
-                    "trade_price" : trade_price,
-                    "current_amt" : current_amt,
-                    "loss_profit_amt" : loss_profit_amt,
-                    "loss_profit_rate" : loss_profit_rate,
-                }
-                cnt_currency += 1
-                currency_list.append(currency_param)
+                    currency_param = {
+                        "name" : item['currency'],
+                        "price" : price,
+                        "volume" : volume,
+                        "amt" : amt,
+                        "locked_volume" : float(item['locked']),
+                        "locked_amt" : int(price*float(item['locked'])),
+                        "trade_price" : trade_price,
+                        "current_amt" : current_amt,
+                        "loss_profit_amt" : loss_profit_amt,
+                        "loss_profit_rate" : loss_profit_rate,
+                    }
+                    cnt_currency += 1
+                    currency_list.append(currency_param)
 
     else:
         for i, item in enumerate(accounts):
             
             price = float(item['avg_buy_price'])  # 평균단가    
-            volume = float(item['balance'])   # 보유수량
+            volume = float(item['balance']) + float(item['locked'])    # 보유수량 = 주문가능 수량 + 주문묶여있는 수량
             amt = int(price * volume)  # 보유금액  
 
-            if item['currency'] != "KRW":
+            if item['currency'] not in ["P", "KRW"]:
                 params = {
                     "markets": "KRW-"+item['currency']
                 }
@@ -1522,17 +1531,22 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
                 loss_profit_amt = 0
                 loss_profit_rate = 0
 
-                # 현재가 정보
-                res = requests.get(api_url + "/v1/ticker", params=params).json()
+                try:
+                    # 현재가 정보
+                    res = requests.get(api_url + "/v1/ticker", params=params).json()
 
-                if isinstance(res, dict) and 'error' in res:
-                    # 에러 메시지가 반환된 경우
-                    error_name = res['error'].get('name', 'Unknown')
-                    error_message = res['error'].get('message', 'Unknown')
-                    print(f"Error {error_name}: {error_message}")
-                    print(item['currency'])
+                    if isinstance(res, dict) and 'error' in res:
+                        # 에러 메시지가 반환된 경우
+                        error_name = res['error'].get('name', 'Unknown')
+                        error_message = res['error'].get('message', 'Unknown')
+                        print(f"[Ticker 조회 오류] {error_name}: {error_message}")
+                        continue
 
-                else:
+                except Exception as e:
+                    print(f"[Ticker 조회 예외] 오류 발생: {e}")
+                    res = None 
+                
+                if res:  
                     trade_price = float(res[0]['trade_price'])
                     trade_volume = float(res[0]['acc_trade_volume'])
                     
