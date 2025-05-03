@@ -17,10 +17,10 @@ def get_balance(cust_nm: str, market_name: str) -> str:
         text_lines = []
         for item in result["balance_list"]:
             text_lines.append(
-                f"*{item['name']}*: 보유단가 {format_number(item['price'])}, 보유금액 {format_number(item['amt'])}원, "
-                f"보유수량 {format_number(item['volume'])}, 매도진행수량 {format_number(item['locked_volume'])}, "
-                f"현재가 {format_number(item['trade_price'])}, 평가금액 {format_number(item['current_amt'])}원, "
-                f"손익금액 {format_number(item['loss_profit_amt'])}원, 손익률 {item['loss_profit_rate']}%"
+                f"*{item['name']}*: 보유량 {format_number(item['volume'])}, 매매진행 {format_number(item['locked_volume'])}, "
+                f"평단가 {format_number(item['price'])}, 현재가 {format_number(item['trade_price'])}, "
+                f"원금액 {format_number(item['amt'])}원, 평가액 {format_number(item['current_amt'])}원, "
+                f"손익금 {format_number(item['loss_profit_amt'])}원, 손익률 {item['loss_profit_rate']}%"
             )
 
         return "\n".join(text_lines) if text_lines else "잔고가 없습니다."

@@ -789,10 +789,52 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
         
                 order_list.append(order_param)
 
+                price = 0
+                volume = 0
+                api_url = ''
+                try:
+                    if trade_mng.market_name == 'UPBIT':
+                        api_url = upbit_api_url
+                        payload = {
+                            'access_key': access_key,
+                            'nonce': str(uuid.uuid4()),
+                        }
+                    elif trade_mng.market_name == 'BITHUMB':   
+                        api_url = bithumb_api_url
+                        payload = {
+                            'access_key': access_key,
+                            'nonce': str(uuid.uuid4()),
+                            'timestamp': round(time.time() * 1000)
+                        }
+
+                    # 잔고 조회
+                    jwt_token = jwt.encode(payload, secret_key)
+                    authorization = 'Bearer {}'.format(jwt_token)
+                    headers = {
+                    'Authorization': authorization,
+                    }
+
+                    res = requests.get(api_url + '/v1/accounts',headers=headers)
+                    accounts = res.json()
+                    
+                except Exception as e:
+                    print(f"[잔고 조회 예외] 오류 발생: {e}")
+                    accounts = []  # 또는 None 등, 이후 구문에서 사용할 수 있도록 기본값 설정    
+
+                for item in accounts:
+                    name = "KRW-"+item['currency']
+                    
+                    # 매매관리정보의 상품코드과 잔고조회의 상품코드가 동일한 경우
+                    if trade_mng.prd_nm == name:
+                        price = float(item['avg_buy_price'])                        # 평균단가    
+                        volume = float(item['balance']) + float(item['locked'])     # 보유수량 = 주문가능 수량 + 주문묶여있는 수량
+                
                 # 주문관리정보 변경 처리
                 UPDATE_TRADE_INFO = """
                                     UPDATE trade_mng 
                                     SET 
+                                        hold_price = :hold_price,
+                                        hold_vol = :hold_vol,
                                         ord_dtm = :ord_dtm,
                                         ord_no = :ord_no,
                                         orgn_ord_no = :orgn_ord_no,
@@ -805,6 +847,8 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                                     AND ord_state = 'wait'
                                     """
                 db.execute(text(UPDATE_TRADE_INFO), {
+                        "hold_price": price,
+                        "hold_vol": volume,
                         "ord_dtm": datetime.fromisoformat(order_status['trades'][0]['created_at']).strftime("%Y%m%d%H%M%S"),
                         "ord_no": order_status['trades'][0]['uuid'],
                         "orgn_ord_no": chk_ord['ord_no'],
