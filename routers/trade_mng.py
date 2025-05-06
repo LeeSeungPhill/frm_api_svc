@@ -302,6 +302,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                             margin_vol,
                             executed_vol,
                             remaining_vol,
+                            paid_fee,
                             regr_id, 
                             reg_date, 
                             chgr_id, 
@@ -328,6 +329,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                             :margin_vol,
                             :executed_vol,
                             :remaining_vol,
+                            :paid_fee,
                             :regr_id,
                             :reg_date,
                             :chgr_id,
@@ -355,6 +357,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                         "margin_vol": 0,
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "regr_id": user_id,
                         "reg_date": datetime.now(),
                         "chgr_id": user_id,
@@ -407,6 +410,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                             margin_vol,
                             executed_vol,
                             remaining_vol,
+                            paid_fee,
                             regr_id, 
                             reg_date, 
                             chgr_id, 
@@ -433,6 +437,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                             :margin_vol,
                             :executed_vol,
                             :remaining_vol,
+                            :paid_fee,
                             :regr_id,
                             :reg_date,
                             :chgr_id,
@@ -460,6 +465,7 @@ def division_sell(trade_mng: dividion_sell, db: Session = Depends(config.get_db)
                         "margin_vol": 0,
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "regr_id": user_id,
                         "reg_date": datetime.now(),
                         "chgr_id": user_id,
@@ -572,6 +578,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                             margin_vol,
                             executed_vol,
                             remaining_vol,
+                            paid_fee,
                             regr_id, 
                             reg_date, 
                             chgr_id, 
@@ -598,6 +605,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                             :margin_vol,
                             :executed_vol,
                             :remaining_vol,
+                            :paid_fee,
                             :regr_id,
                             :reg_date,
                             :chgr_id,
@@ -625,6 +633,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                         "margin_vol": margin_vol,
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "regr_id": user_id,
                         "reg_date": datetime.now(),
                         "chgr_id": user_id,
@@ -679,6 +688,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                             margin_vol,
                             executed_vol,
                             remaining_vol,
+                            paid_fee,
                             regr_id, 
                             reg_date, 
                             chgr_id, 
@@ -705,6 +715,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                             :margin_vol,
                             :executed_vol,
                             :remaining_vol,
+                            :paid_fee,
                             :regr_id,
                             :reg_date,
                             :chgr_id,
@@ -732,6 +743,7 @@ def division_buy(trade_mng: dividion_buy, db: Session = Depends(config.get_db)):
                         "margin_vol": margin_vol,
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "regr_id": user_id,
                         "reg_date": datetime.now(),
                         "chgr_id": user_id,
@@ -841,6 +853,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                                         ord_state = :ord_state,
                                         executed_vol = :executed_vol, 
                                         remaining_vol = :remaining_vol, 
+                                        paid_fee = :paid_fee,
                                         chgr_id = :chgr_id, 
                                         chg_date = :chg_date
                                     WHERE id = :id
@@ -855,6 +868,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                         "ord_state": order_status['state'],
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "chgr_id": user_id,
                         "chg_date": datetime.now(),
                         "id": chk_ord['id']
@@ -885,6 +899,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                                         ord_state = :ord_state,
                                         executed_vol = :executed_vol, 
                                         remaining_vol = :remaining_vol, 
+                                        paid_fee = :paid_fee,
                                         chgr_id = :chgr_id, 
                                         chg_date = :chg_date
                                     WHERE id = :id
@@ -894,6 +909,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                         "ord_state": order_status['state'],
                         "executed_vol": Decimal(order_status['executed_volume']),
                         "remaining_vol": Decimal(order_status['remaining_volume']),
+                        "paid_fee": Decimal(order_status['paid_fee']),
                         "chgr_id": user_id,
                         "chg_date": datetime.now(),
                         "id": chk_ord['id']
@@ -956,6 +972,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                                                         ord_state = :ord_state,
                                                         executed_vol = :executed_vol, 
                                                         remaining_vol = :remaining_vol, 
+                                                        paid_fee = :paid_fee,
                                                         chgr_id = :chgr_id, 
                                                         chg_date = :chg_date
                                                     WHERE id = :id
@@ -965,6 +982,7 @@ def open_order(trade_mng: open_order, db: Session = Depends(config.get_db)):
                                         "ord_state": item['state'],
                                         "executed_vol": Decimal(item['executed_volume']),
                                         "remaining_vol": Decimal(item['remaining_volume']),
+                                        "paid_fee": Decimal(item['paid_fee']),
                                         "chgr_id": user_id,
                                         "chg_date": datetime.now(),
                                         "id": chk_ord['id']
@@ -1202,6 +1220,7 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                                                 ord_state = :ord_state,
                                                 executed_vol = :executed_vol, 
                                                 remaining_vol = :remaining_vol, 
+                                                paid_fee = :paid_fee,
                                                 chgr_id = :chgr_id, 
                                                 chg_date = :chg_date
                                             WHERE id = :id
@@ -1211,6 +1230,7 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                                 "ord_state": item['state'],
                                 "executed_vol": Decimal(item['executed_volume']),
                                 "remaining_vol": Decimal(item['remaining_volume']),
+                                "paid_fee": Decimal(item['paid_fee']),
                                 "chgr_id": user_id,
                                 "chg_date": datetime.now(),
                                 "id": chk_ord['id']
@@ -1292,6 +1312,7 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                                             ord_state = :ord_state,
                                             executed_vol = :executed_vol, 
                                             remaining_vol = :remaining_vol, 
+                                            paid_fee = :paid_fee,
                                             chgr_id = :chgr_id, 
                                             chg_date = :chg_date
                                         WHERE id = :id
@@ -1301,6 +1322,7 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                             "ord_state": item['state'],
                             "executed_vol": Decimal(item['executed_volume']),
                             "remaining_vol": Decimal(item['remaining_volume']),
+                            "paid_fee": Decimal(item['paid_fee']),
                             "chgr_id": user_id,
                             "chg_date": datetime.now(),
                             "id": chk_trade_list[0]
