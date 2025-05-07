@@ -36,7 +36,7 @@ async def slack_command(request: Request):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"안녕하세요 <@{user_id}>님! 무엇을 하시겠습니까?"
+                        "text": f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"
                     }
                 },
                 {
@@ -46,31 +46,56 @@ async def slack_command(request: Request):
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "잔고정보",
+                                "text": "UPBIT",
                             },
-                            "value": "balance",
-                            "action_id": "balance_action"
+                            "value": "UPBIT",
+                            "action_id": "select_upbit"
                         },
                         {
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "매수",
+                                "text": "BITHUMB",
                             },
-                            "value": "buy",
-                            "action_id": "buy_action"
-                        },
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "매도",
-                            },
-                            "value": "sell",
-                            "action_id": "sell_action"
+                            "value": "BITHUMB",
+                            "action_id": "select_bithumb"
                         }
                     ]
                 }
+                    
+                
+                # {
+                #     "type": "actions",
+                #     "elements": [
+                #         {
+                #             "type": "button",
+                #             "text": {
+                #                 "type": "plain_text",
+                #                 "text": "잔고정보",
+                #             },
+                #             "value": "balance",
+                #             "action_id": "balance_action"
+                #         },
+                #         {
+                #             "type": "button",
+                #             "text": {
+                #                 "type": "plain_text",
+                #                 "text": "매매관리",
+                #             },
+                #             "value": "trade_mng",
+                #             "action_id": "mng_action"
+                #         },
+                #         {
+                #             "type": "button",
+                #             "text": {
+                #                 "type": "plain_text",
+                #                 "text": "매매계획",
+                #             },
+                #             "value": "trade_plan",
+                #             "action_id": "plan_action"
+                #         }
+                #     ]
+                # }
             ]
         }
     )
@@ -87,18 +112,19 @@ async def slack_interactivity(request: Request):
 
     message = {}
 
-    if action_id == "balance_action":
-        # 거래소 선택 버튼 응답
+    if action_id in ["select_upbit", "select_bithumb"]:
+        market_name = payload["actions"][0]["value"]
+
         message = {
             "response_type": "ephemeral",
             "replace_original": True,
-            "text": "거래소 선택",
+            "text": "고객 선택",
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "어느 거래소의 잔고를 확인하시겠습니까?"
+                        "text": "어느 고객을 선택하시겠습니까?"
                     }
                 },
                 {
@@ -108,29 +134,38 @@ async def slack_interactivity(request: Request):
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "UPBIT",
+                                "text": "phills2",
                                 "emoji": True
                             },
-                            "value": "UPBIT",
-                            "action_id": "select_upbit"
+                            "value": "phills2",
+                            "action_id": "select_phills2"
                         },
                         {
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "BITHUMB",
+                                "text": "mama",
                                 "emoji": True
                             },
-                            "value": "BITHUMB",
-                            "action_id": "select_bithumb"
+                            "value": "mama",
+                            "action_id": "select_mama"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "honey",
+                                "emoji": True
+                            },
+                            "value": "mama",
+                            "action_id": "select_honey"
                         }
                     ]
                 }
             ]
         }
 
-    elif action_id in ["select_upbit", "select_bithumb"]:
-        # 고객명 입력 모달 응답
+    elif action_id in ["select_phills2", "select_mama", "select_honey"]:
         market_name = payload["actions"][0]["value"]
 
         message = {
@@ -138,40 +173,43 @@ async def slack_interactivity(request: Request):
             "replace_original": True,
             "blocks": [
                 {
-                    "type": "input",
-                    "block_id": "cust_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_cust_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "고객명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": f"{market_name} 고객명 입력"
-                    }
-                },
-                {
                     "type": "actions",
                     "elements": [
                         {
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "조회",
-                                "emoji": True
+                                "text": "잔고정보",
                             },
-                            "value": market_name,
-                            "action_id": "confirm_balance"
+                            "value": "balance",
+                            "action_id": "balance_action"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "매매관리",
+                            },
+                            "value": "trade_mng",
+                            "action_id": "mng_action"
+                        },
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "매매계획",
+                            },
+                            "value": "trade_plan",
+                            "action_id": "plan_action"
                         }
                     ]
                 }
             ]
         }
+    
+    elif action_id == "balance_action":
+        market_name = payload["actions"][0]["value"]
 
-    elif action_id == "confirm_balance":
         # 고객명 입력받아 잔고 조회
         market_name = payload["actions"][0]["value"]
         cust_nm = payload["state"]["values"]["cust_input_block"]["input_cust_nm"]["value"]
@@ -187,6 +225,206 @@ async def slack_interactivity(request: Request):
             "replace_original": True,
             "text": result_text
         }
+
+
+        # message = {
+        #     "response_type": "ephemeral",
+        #     "replace_original": True,
+        #     "blocks": [
+        #         {
+        #             "type": "input",
+        #             "block_id": "cust_input_block",
+        #             "element": {
+        #                 "type": "plain_text_input",
+        #                 "action_id": "input_cust_nm",
+        #                 "placeholder": {
+        #                     "type": "plain_text",
+        #                     "text": "고객명을 입력해주세요"
+        #                 }
+        #             },
+        #             "label": {
+        #                 "type": "plain_text",
+        #                 "text": f"{market_name} 고객명 입력"
+        #             }
+        #         },
+        #         {
+        #             "type": "actions",
+        #             "elements": [
+        #                 {
+        #                     "type": "button",
+        #                     "text": {
+        #                         "type": "plain_text",
+        #                         "text": "조회",
+        #                         "emoji": True
+        #                     },
+        #                     "value": market_name,
+        #                     "action_id": "confirm_balance"
+        #                 }
+        #             ]
+        #         }
+        #     ]
+        # }
+        # 거래소 선택 버튼 응답
+        # message = {
+        #     "response_type": "ephemeral",
+        #     "replace_original": True,
+        #     "text": "거래소 선택",
+        #     "blocks": [
+        #         {
+        #             "type": "section",
+        #             "text": {
+        #                 "type": "mrkdwn",
+        #                 "text": "어느 거래소의 잔고를 확인하시겠습니까?"
+        #             }
+        #         },
+        #         {
+        #             "type": "actions",
+        #             "elements": [
+        #                 {
+        #                     "type": "button",
+        #                     "text": {
+        #                         "type": "plain_text",
+        #                         "text": "UPBIT",
+        #                         "emoji": True
+        #                     },
+        #                     "value": "UPBIT",
+        #                     "action_id": "select_upbit"
+        #                 },
+        #                 {
+        #                     "type": "button",
+        #                     "text": {
+        #                         "type": "plain_text",
+        #                         "text": "BITHUMB",
+        #                         "emoji": True
+        #                     },
+        #                     "value": "BITHUMB",
+        #                     "action_id": "select_bithumb"
+        #                 }
+        #             ]
+        #         }
+        #     ]
+        # }
+
+    # elif action_id in ["select_upbit", "select_bithumb"]:
+    #     # 고객명 입력 모달 응답
+    #     market_name = payload["actions"][0]["value"]
+
+    #     message = {
+    #         "response_type": "ephemeral",
+    #         "replace_original": True,
+    #         "blocks": [
+    #             {
+    #                 "type": "input",
+    #                 "block_id": "cust_input_block",
+    #                 "element": {
+    #                     "type": "plain_text_input",
+    #                     "action_id": "input_cust_nm",
+    #                     "placeholder": {
+    #                         "type": "plain_text",
+    #                         "text": "고객명을 입력해주세요"
+    #                     }
+    #                 },
+    #                 "label": {
+    #                     "type": "plain_text",
+    #                     "text": f"{market_name} 고객명 입력"
+    #                 }
+    #             },
+    #             {
+    #                 "type": "actions",
+    #                 "elements": [
+    #                     {
+    #                         "type": "button",
+    #                         "text": {
+    #                             "type": "plain_text",
+    #                             "text": "조회",
+    #                             "emoji": True
+    #                         },
+    #                         "value": market_name,
+    #                         "action_id": "confirm_balance"
+    #                     }
+    #                 ]
+    #             }
+    #         ]
+    #     }
+
+    # elif action_id == "confirm_balance":
+    #     # 고객명 입력받아 잔고 조회
+    #     market_name = payload["actions"][0]["value"]
+    #     cust_nm = payload["state"]["values"]["cust_input_block"]["input_cust_nm"]["value"]
+
+    #     try:
+    #         balance_result = get_balance(cust_nm, market_name)
+    #         result_text = f"<@{user_id}>님의 {market_name} 잔고:\n{balance_result}"
+    #     except Exception as e:
+    #         result_text = f"잔고 조회 중 오류 발생: {e}"
+
+    #     message = {
+    #         "response_type": "ephemeral",
+    #         "replace_original": True,
+    #         "text": result_text
+    #     }
+
+    # elif action_id == "mng_action":
+    #     # 매매관리 선택 버튼 응답
+    #     message = {
+    #         "response_type": "ephemeral",
+    #         "replace_original": True,
+    #         "text": "매매관리 선택",
+    #         "blocks": [
+    #             {
+    #                 "type": "section",
+    #                 "text": {
+    #                     "type": "mrkdwn",
+    #                     "text": "어느 거래소의 잔고를 확인하시겠습니까?"
+    #                 }
+    #             },
+    #             {
+    #                 "type": "actions",
+    #                 "elements": [
+    #                     {
+    #                         "type": "button",
+    #                         "text": {
+    #                             "type": "plain_text",
+    #                             "text": "매수",
+    #                             "emoji": True
+    #                         },
+    #                         "value": "UPBIT",
+    #                         "action_id": "select_upbit"
+    #                     },
+    #                     {
+    #                         "type": "button",
+    #                         "text": {
+    #                             "type": "plain_text",
+    #                             "text": "매도",
+    #                             "emoji": True
+    #                         },
+    #                         "value": "BITHUMB",
+    #                         "action_id": "select_bithumb"
+    #                     },
+    #                     {
+    #                         "type": "button",
+    #                         "text": {
+    #                             "type": "plain_text",
+    #                             "text": "주문내역",
+    #                             "emoji": True
+    #                         },
+    #                         "value": "BITHUMB",
+    #                         "action_id": "select_bithumb"
+    #                     },
+    #                     {
+    #                         "type": "button",
+    #                         "text": {
+    #                             "type": "plain_text",
+    #                             "text": "주문취소",
+    #                             "emoji": True
+    #                         },
+    #                         "value": "BITHUMB",
+    #                         "action_id": "select_bithumb"
+    #                     }
+    #                 ]
+    #             }
+    #         ]
+    #     }
 
     else:
         # 기타 예외
