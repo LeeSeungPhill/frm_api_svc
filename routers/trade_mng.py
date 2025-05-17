@@ -57,7 +57,9 @@ def account_list(trade_mng: account_list, db: Session = Depends(config.get_db)):
                     "trade_price": item["trade_price"],
                     "current_amt": item["current_amt"],
                     "loss_profit_amt": item["loss_profit_amt"],
-                    "loss_profit_rate": item["loss_profit_rate"]
+                    "loss_profit_rate": item["loss_profit_rate"],
+                    "access_key": access_key,
+                    "secret_key": secret_key
                 }
             for item in raw_balance_list
         ]}
@@ -1238,96 +1240,93 @@ def close_order(trade_mng: close_order, db: Session = Depends(config.get_db)):
                         db.commit()
     # 2. 주문번호 미존재 대상
     else:
-        # 이전 주문 조회 위한 고객관리정보 조회
-        SELECT_OPEN_ORDER_INFO = """
-                SELECT A.cust_num, A.market_name, A.access_key, A.secret_key
-                FROM cust_mng A
-                WHERE A.cust_nm = :cust_nm AND A.market_name = :market_name
-        """
-        chk_ord_list = db.execute(text(SELECT_OPEN_ORDER_INFO), {"cust_nm": trade_mng.cust_nm, "market_name": trade_mng.market_name,}).mappings().all()
 
-        for chk_ord in chk_ord_list :
-            access_key = chk_ord['access_key']
-            secret_key = chk_ord['secret_key']
+        # 고객명에 의한 고객정보 조회
+        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, trade_mng.cust_nm, trade_mng.market_name)
 
-            date_obj = datetime.strptime(trade_mng.start_dt, '%Y%m%d')
-            datetime_with_time = datetime.combine(date_obj, datetime.strptime('00:00:00', '%H:%M:%S').time())
-            start_dt = datetime_with_time.isoformat() + "+09:00"
+        # access key
+        access_key = cust_info[4]
+        # secret_key
+        secret_key = cust_info[5]
 
-            params = {
-                'market': trade_mng.prd_nm,         # 마켓 ID
-                'states[]': ['done', 'cancel'],
-                "start_time": start_dt,             # 조회시작일 이후 7일까지
+        date_obj = datetime.strptime(trade_mng.start_dt, '%Y%m%d')
+        datetime_with_time = datetime.combine(date_obj, datetime.strptime('00:00:00', '%H:%M:%S').time())
+        start_dt = datetime_with_time.isoformat() + "+09:00"
+
+        params = {
+            'market': trade_mng.prd_nm,         # 마켓 ID
+            'states[]': ['done', 'cancel'],
+            "start_time": start_dt,             # 조회시작일 이후 7일까지
+        }
+
+        query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
+
+        m = hashlib.sha512()
+        m.update(query_string)
+        query_hash = m.hexdigest()
+
+        payload = {
+            'access_key': access_key,
+            'nonce': str(uuid.uuid4()),
+            'query_hash': query_hash,
+            'query_hash_alg': 'SHA512',
+        }
+
+        jwt_token = jwt.encode(payload, secret_key)
+        authorization = 'Bearer {}'.format(jwt_token)
+        headers = {
+            'Authorization': authorization,
+        }
+        # 종료된 주문 조회
+        raw_order_list = requests.get(upbit_api_url + '/v1/orders/closed', params=params, headers=headers).json()
+
+        for item in raw_order_list:
+            order_param = {
+                "ord_dtm": datetime.fromisoformat(item['created_at']).strftime("%Y%m%d%H%M%S"),
+                "ord_no": item['uuid'],
+                "prd_nm": item['market'],
+                "ord_tp": '01' if item['side'] == 'bid' else '02',
+                "ord_state": item['state'],
+                "ord_price": item['price'],
+                "ord_vol": item['volume'],
+                "executed_vol": item['executed_volume'],
+                "remaining_vol": item['remaining_volume']
             }
 
-            query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
+            order_list.append(order_param)
 
-            m = hashlib.sha512()
-            m.update(query_string)
-            query_hash = m.hexdigest()
+            SELECT_TRADE_INFO = """
+                    SELECT A.id
+                    FROM trade_mng A
+                    WHERE A.ord_no = :ord_no
+            """
+            chk_trade_list = db.execute(text(SELECT_TRADE_INFO), {"ord_no": item['uuid'],}).first()
 
-            payload = {
-                'access_key': access_key,
-                'nonce': str(uuid.uuid4()),
-                'query_hash': query_hash,
-                'query_hash_alg': 'SHA512',
-            }
+            if chk_trade_list is not None:
 
-            jwt_token = jwt.encode(payload, secret_key)
-            authorization = 'Bearer {}'.format(jwt_token)
-            headers = {
-                'Authorization': authorization,
-            }
-            # 종료된 주문 조회
-            raw_order_list = requests.get(upbit_api_url + '/v1/orders/closed', params=params, headers=headers).json()
-
-            for item in raw_order_list:
-                order_param = {
-                    "ord_dtm": datetime.fromisoformat(item['created_at']).strftime("%Y%m%d%H%M%S"),
-                    "ord_no": item['uuid'],
-                    "prd_nm": item['market'],
-                    "ord_tp": '01' if item['side'] == 'bid' else '02',
-                    "ord_state": item['state'],
-                    "ord_price": item['price'],
-                    "ord_vol": item['volume'],
-                    "executed_vol": item['executed_volume'],
-                    "remaining_vol": item['remaining_volume']
-                }
-    
-                order_list.append(order_param)
-
-                SELECT_TRADE_INFO = """
-                        SELECT A.id
-                        FROM trade_mng A
-                        WHERE A.ord_no = :ord_no
-                """
-                chk_trade_list = db.execute(text(SELECT_TRADE_INFO), {"ord_no": item['uuid'],}).first()
-
-                if chk_trade_list is not None:
-
-                    # 주문관리정보 변경 처리
-                    UPDATE_TRADE_INFO = """
-                                        UPDATE trade_mng 
-                                        SET 
-                                            ord_state = :ord_state,
-                                            executed_vol = :executed_vol, 
-                                            remaining_vol = :remaining_vol, 
-                                            paid_fee = :paid_fee,
-                                            chgr_id = :chgr_id, 
-                                            chg_date = :chg_date
-                                        WHERE id = :id
-                                        AND ord_state = 'wait'
-                                        """
-                    db.execute(text(UPDATE_TRADE_INFO), {
-                            "ord_state": item['state'],
-                            "executed_vol": Decimal(item['executed_volume']),
-                            "remaining_vol": Decimal(item['remaining_volume']),
-                            "paid_fee": Decimal(item['paid_fee']),
-                            "chgr_id": user_id,
-                            "chg_date": datetime.now(),
-                            "id": chk_trade_list[0]
-                            })
-                    db.commit()
+                # 주문관리정보 변경 처리
+                UPDATE_TRADE_INFO = """
+                                    UPDATE trade_mng 
+                                    SET 
+                                        ord_state = :ord_state,
+                                        executed_vol = :executed_vol, 
+                                        remaining_vol = :remaining_vol, 
+                                        paid_fee = :paid_fee,
+                                        chgr_id = :chgr_id, 
+                                        chg_date = :chg_date
+                                    WHERE id = :id
+                                    AND ord_state = 'wait'
+                                    """
+                db.execute(text(UPDATE_TRADE_INFO), {
+                        "ord_state": item['state'],
+                        "executed_vol": Decimal(item['executed_volume']),
+                        "remaining_vol": Decimal(item['remaining_volume']),
+                        "paid_fee": Decimal(item['paid_fee']),
+                        "chgr_id": user_id,
+                        "chg_date": datetime.now(),
+                        "id": chk_trade_list[0]
+                        })
+                db.commit()
         
     return OrderResponse(order_list=order_list)
 
@@ -1619,17 +1618,17 @@ def balance(access_key, secret_key, market_name, prd_nm: Optional[str] = None,):
                     if trade_price == 0:
                         continue
                     
-                    result = candle_info("KRW-"+item['currency'], market_name, api_url)
-                    # 전일저가 금일종가 이탈하는 경우
-                    if trade_price < result[0]['low_price']:
-                        print("name : ",item['currency'], "현재가 : ",trade_price, "전일 저가 이탈 : ",result[0]['low_price'])
-                        # 거래량이 전일보다 많은 경우
-                        if trade_volume > result[0]['trade_volume']:
-                            print("name : ",item['currency'],"거래량 : ",trade_volume, "전일 거래량 : ",result[0]['trade_volume'])
+                    # result = candle_info("KRW-"+item['currency'], market_name, api_url)
+                    # # 전일저가 금일종가 이탈하는 경우
+                    # if trade_price < result[0]['low_price']:
+                    #     print("name : ",item['currency'], "현재가 : ",trade_price, "전일 저가 이탈 : ",result[0]['low_price'])
+                    #     # 거래량이 전일보다 많은 경우
+                    #     if trade_volume > result[0]['trade_volume']:
+                    #         print("name : ",item['currency'],"거래량 : ",trade_volume, "전일 거래량 : ",result[0]['trade_volume'])
 
-                    is_breakdown = candle_minutes_info("KRW-"+item['currency'], market_name, api_url, "15")
-                    if is_breakdown:
-                        print("name : ", item['currency'], " 의 이전 분봉의 저가를 이탈했습니다.")
+                    # is_breakdown = candle_minutes_info("KRW-"+item['currency'], market_name, api_url, "15")
+                    # if is_breakdown:
+                    #     print("name : ", item['currency'], " 의 이전 분봉의 저가를 이탈했습니다.")
                             
                     # 현재평가금액
                     current_amt = int(trade_price * volume)
@@ -1773,7 +1772,7 @@ def candle_minutes_info(market, market_name, api_url, in_minutes):
     
     return is_breakdown
 
-def place_order(access_key, secret_key, market, side, volume, price, ord_type="limit"):
+def place_order(access_key, secret_key, market, side, volume, price, ord_type):
     params= {
         'market': market,       # 마켓 ID
         'side': side,           # bid : 매수, ask : 매도
@@ -1806,7 +1805,7 @@ def place_order(access_key, secret_key, market, side, volume, price, ord_type="l
     print("result : ", res.json())
     return res.json()
 
-def bithumb_order(access_key, secret_key, market, side, volume, price, ord_type="limit"):
+def bithumb_order(access_key, secret_key, market, side, volume, price, ord_type):
     requestBody = dict( market=market, side=side, volume=volume, price=price, ord_type=ord_type)
 
     # Generate access token
