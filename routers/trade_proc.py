@@ -73,11 +73,11 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
         balance_info = balance(access_key, secret_key, market_name)
         hold_price = 0
         hold_vol = 0
-
+        
         for item in balance_info:
-            if "KRW-"+prd_nm == item["name"]:
+            if prd_nm == item["name"]:
                 hold_price = float(item['price'])                                   # 매수평균가    
-                hold_vol = float(item['volume']) + float(item['locked_volume'])     # 보유수량 = 주문가능 수량 + 주문묶여있는 수량
+                hold_vol = float(item['volume']) + float(item['locked_volume'])     # 보유수량 = 주문가능 수량 + 주문묶여있는 수량        
 
         if gubun ==  "cut":
             
@@ -96,14 +96,14 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
             price = 0
             volume = 0
             ord_amt = 0
-            
-            params = {
-                "markets": "KRW-"+ item[2]
-            }
 
+            params = {
+                "markets": "KRW-"+ item["name"]
+            }
+            
             try:
                 
-                if market_name == 'UPBIT':
+                if market_name == 'UPBIT':                    
                     # 현재가 정보
                     res = requests.get(upbit_api_url + "/v1/ticker", params=params).json()
                 elif market_name == 'BITHUMB': 
@@ -122,7 +122,7 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
             
             if len(res) > 0:                
                 price = float(res[0]['trade_price'])                 
-                volume = (float(buy_amt) / price).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+                volume = (Decimal(buy_amt) / Decimal(price)).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
                 ord_amt = int(Decimal(str(price)) * Decimal(str(volume))) 
                   
         elif gubun ==  "custom":
@@ -131,8 +131,8 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
             volume = float(custom_volumn)      
             ord_amt = int(Decimal(str(price)) * Decimal(str(custom_volumn)))
                         
-        # 주문유형 설정 : 시장가 매도 주문, 지정가 주문
-        ord_type = "market" if gubun == "direct" else "limit"
+        # 주문유형 설정 : 시장가 매수 주문, 지정가 주문
+        ord_type = "price" if gubun == "direct" else "limit"
 
         if market_name == 'UPBIT':
             
@@ -170,7 +170,7 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     market="KRW-"+prd_nm,
                     side="bid",                     # 매수
                     volume=str(volume),             # 매수량
-                    price=str(price),               # 매수가격
+                    price=str(ord_amt) if ord_type == "price" else str(price),               # 시장가 : 매수금액, 지정가 : 매수가격
                     ord_type=ord_type               # 주문유형
                 )
 
@@ -179,109 +179,214 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                 if "uuid" in order_response:
                     ord_no  = order_response["uuid"]  # 주문 ID
                     time.sleep(1)
-                    order_status = get_order(access_key, secret_key, ord_no)
-                    print("주문 상태:", order_status)
+                    # 시장가 매수 주문인 경우
+                    if ord_type == "price":
+                        
+                        # 주문관리정보 생성
+                        INSERT_TRADE_INFO = """
+                            INSERT INTO trade_mng (
+                                cust_num, 
+                                market_name, 
+                                ord_dtm, 
+                                ord_no, 
+                                prd_nm, 
+                                ord_tp,
+                                ord_state,
+                                ord_count,
+                                ord_expect_totamt,
+                                ord_price,
+                                ord_vol,
+                                ord_amt,
+                                cut_price,
+                                cut_rate,
+                                cut_amt,
+                                goal_price,
+                                goal_rate,
+                                goal_amt,
+                                margin_vol,
+                                executed_vol,
+                                remaining_vol,
+                                hold_price,
+                                hold_vol,
+                                paid_fee,
+                                regr_id, 
+                                reg_date, 
+                                chgr_id, 
+                                chg_date)
+                            VALUES (
+                                :cust_num, 
+                                :market_name, 
+                                :ord_dtm,
+                                :ord_no,
+                                :prd_nm,
+                                :ord_tp,
+                                :ord_state,
+                                :ord_count,
+                                :ord_expect_totamt,
+                                :ord_price,
+                                :ord_vol,
+                                :ord_amt,
+                                :cut_price,
+                                :cut_rate,
+                                :cut_amt,
+                                :goal_price,
+                                :goal_rate,
+                                :goal_amt,
+                                :margin_vol,
+                                :executed_vol,
+                                :remaining_vol,
+                                :hold_price,
+                                :hold_vol,
+                                :paid_fee,
+                                :regr_id,
+                                :reg_date,
+                                :chgr_id,
+                                :chg_date)
+                        """
+                        db.execute(text(INSERT_TRADE_INFO), {
+                            "cust_num": cust_info[0], 
+                            "market_name": market_name, 
+                            "ord_dtm": datetime.fromisoformat(order_response['created_at']).strftime("%Y%m%d%H%M%S"), 
+                            "ord_no": ord_no, 
+                            "prd_nm": "KRW-"+prd_nm,
+                            "ord_tp": "01",
+                            "ord_state": order_response['state'],
+                            "ord_count": 0,
+                            "ord_expect_totamt": 0,
+                            "ord_price": price,
+                            "ord_vol": volume,
+                            "ord_amt": ord_amt,
+                            "cut_price": 0,
+                            "cut_rate": 0,
+                            "cut_amt": 0,
+                            "goal_price": 0,
+                            "goal_rate": 0,
+                            "goal_amt": 0,
+                            "margin_vol": 0,
+                            "executed_vol": Decimal(order_response['executed_volume']),
+                            "remaining_vol": 0,
+                            "hold_price":hold_price,
+                            "hold_vol":hold_vol,
+                            "paid_fee": Decimal(order_response['paid_fee']),
+                            "regr_id": user_id,
+                            "reg_date": datetime.now(),
+                            "chgr_id": user_id,
+                            "chg_date": datetime.now()
+                            })
+                        db.commit()
 
-                    # 주문관리정보 생성
-                    INSERT_TRADE_INFO = """
-                        INSERT INTO trade_mng (
-                            cust_num, 
-                            market_name, 
-                            ord_dtm, 
-                            ord_no, 
-                            prd_nm, 
-                            ord_tp,
-                            ord_state,
-                            ord_count,
-                            ord_expect_totamt,
-                            ord_price,
-                            ord_vol,
-                            ord_amt,
-                            cut_price,
-                            cut_rate,
-                            cut_amt,
-                            goal_price,
-                            goal_rate,
-                            goal_amt,
-                            margin_vol,
-                            executed_vol,
-                            remaining_vol,
-                            hold_price,
-                            hold_vol,
-                            paid_fee,
-                            regr_id, 
-                            reg_date, 
-                            chgr_id, 
-                            chg_date)
-                        VALUES (
-                            :cust_num, 
-                            :market_name, 
-                            :ord_dtm,
-                            :ord_no,
-                            :prd_nm,
-                            :ord_tp,
-                            :ord_state,
-                            :ord_count,
-                            :ord_expect_totamt,
-                            :ord_price,
-                            :ord_vol,
-                            :ord_amt,
-                            :cut_price,
-                            :cut_rate,
-                            :cut_amt,
-                            :goal_price,
-                            :goal_rate,
-                            :goal_amt,
-                            :margin_vol,
-                            :executed_vol,
-                            :remaining_vol,
-                            :hold_price,
-                            :hold_vol,
-                            :paid_fee,
-                            :regr_id,
-                            :reg_date,
-                            :chgr_id,
-                            :chg_date)
-                    """
-                    db.execute(text(INSERT_TRADE_INFO), {
-                        "cust_num": cust_info[0], 
-                        "market_name": market_name, 
-                        "ord_dtm": datetime.fromisoformat(order_status['created_at']).strftime("%Y%m%d%H%M%S"), 
-                        "ord_no": ord_no, 
-                        "prd_nm": "KRW-"+prd_nm,
-                        "ord_tp": "01",
-                        "ord_state": order_status['state'],
-                        "ord_count": 0,
-                        "ord_expect_totamt": 0,
-                        "ord_price": price,
-                        "ord_vol": volume,
-                        "ord_amt": ord_amt,
-                        "cut_price": 0,
-                        "cut_rate": 0,
-                        "cut_amt": 0,
-                        "goal_price": 0,
-                        "goal_rate": 0,
-                        "goal_amt": 0,
-                        "margin_vol": 0,
-                        "executed_vol": Decimal(order_status['executed_volume']),
-                        "remaining_vol": Decimal(order_status['remaining_volume']),
-                        "hold_price":hold_price,
-                        "hold_vol":hold_vol,
-                        "paid_fee": Decimal(order_status['paid_fee']),
-                        "regr_id": user_id,
-                        "reg_date": datetime.now(),
-                        "chgr_id": user_id,
-                        "chg_date": datetime.now()
-                        })
-                    db.commit()
+                        summary = (
+                                f"*{prd_nm}*: {'매수' if order_response['side'] == 'bid' else '매도'} 주문 {order_response['state']} 상태\n"
+                                f"> 주문단가: {format_number(str(price))}\n"
+                                f"> 주문시간: {datetime.fromisoformat(order_response['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"> 주문량: {format_number(str(volume))}"
+                        )
+                        text_lines.append((summary, order_status['uuid']))
+                         
+                    else:
+                        order_status = get_order(access_key, secret_key, ord_no)
+                        print("주문 상태:", order_status)
 
-                    summary = (
-                            f"*{prd_nm}*: {'매수' if order_status['side'] == 'bid' else '매도'} 주문 {order_status['state']} 상태\n"
-                            f"> 주문단가: {format_number(str(price))}\n"
-                            f"> 주문시간: {datetime.fromisoformat(order_status['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"> 주문량: {format_number(order_status['volume'])}, 채결량: {format_number(order_status['executed_volume'])}, 잔량: {format_number(order_status['remaining_volume'])}"
-                    )
-                    text_lines.append((summary, order_status['uuid']))
+                        # 주문관리정보 생성
+                        INSERT_TRADE_INFO = """
+                            INSERT INTO trade_mng (
+                                cust_num, 
+                                market_name, 
+                                ord_dtm, 
+                                ord_no, 
+                                prd_nm, 
+                                ord_tp,
+                                ord_state,
+                                ord_count,
+                                ord_expect_totamt,
+                                ord_price,
+                                ord_vol,
+                                ord_amt,
+                                cut_price,
+                                cut_rate,
+                                cut_amt,
+                                goal_price,
+                                goal_rate,
+                                goal_amt,
+                                margin_vol,
+                                executed_vol,
+                                remaining_vol,
+                                hold_price,
+                                hold_vol,
+                                paid_fee,
+                                regr_id, 
+                                reg_date, 
+                                chgr_id, 
+                                chg_date)
+                            VALUES (
+                                :cust_num, 
+                                :market_name, 
+                                :ord_dtm,
+                                :ord_no,
+                                :prd_nm,
+                                :ord_tp,
+                                :ord_state,
+                                :ord_count,
+                                :ord_expect_totamt,
+                                :ord_price,
+                                :ord_vol,
+                                :ord_amt,
+                                :cut_price,
+                                :cut_rate,
+                                :cut_amt,
+                                :goal_price,
+                                :goal_rate,
+                                :goal_amt,
+                                :margin_vol,
+                                :executed_vol,
+                                :remaining_vol,
+                                :hold_price,
+                                :hold_vol,
+                                :paid_fee,
+                                :regr_id,
+                                :reg_date,
+                                :chgr_id,
+                                :chg_date)
+                        """
+                        db.execute(text(INSERT_TRADE_INFO), {
+                            "cust_num": cust_info[0], 
+                            "market_name": market_name, 
+                            "ord_dtm": datetime.fromisoformat(order_status['created_at']).strftime("%Y%m%d%H%M%S"), 
+                            "ord_no": ord_no, 
+                            "prd_nm": "KRW-"+prd_nm,
+                            "ord_tp": "01",
+                            "ord_state": order_status['state'],
+                            "ord_count": 0,
+                            "ord_expect_totamt": 0,
+                            "ord_price": price,
+                            "ord_vol": volume,
+                            "ord_amt": ord_amt,
+                            "cut_price": 0,
+                            "cut_rate": 0,
+                            "cut_amt": 0,
+                            "goal_price": 0,
+                            "goal_rate": 0,
+                            "goal_amt": 0,
+                            "margin_vol": 0,
+                            "executed_vol": Decimal(order_status['executed_volume']),
+                            "remaining_vol": Decimal(order_status['remaining_volume']),
+                            "hold_price":hold_price,
+                            "hold_vol":hold_vol,
+                            "paid_fee": Decimal(order_status['paid_fee']),
+                            "regr_id": user_id,
+                            "reg_date": datetime.now(),
+                            "chgr_id": user_id,
+                            "chg_date": datetime.now()
+                            })
+                        db.commit()
+
+                        summary = (
+                                f"*{prd_nm}*: {'매수' if order_status['side'] == 'bid' else '매도'} 주문 {order_status['state']} 상태\n"
+                                f"> 주문단가: {format_number(str(price))}\n"
+                                f"> 주문시간: {datetime.fromisoformat(order_status['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"> 주문량: {format_number(order_status['volume'])}, 채결량: {format_number(order_status['executed_volume'])}, 잔량: {format_number(order_status['remaining_volume'])}"
+                        )
+                        text_lines.append((summary, order_status['uuid']))
                 else:
                     text_lines.append(
                         f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"
@@ -317,8 +422,11 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
             trade_cash = 0
             
             for item in accounts:
-                if "KRW" == item['currency']:  
-                    trade_cash = (Decimal(item['balance']) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)    # 수수료를 제외한 주문가능 금액
+                if "KRW" == item['currency']:
+                    if Decimal(item['balance']) == 0:
+                        trade_cash = Decimal('0')
+                    else:
+                        trade_cash = (Decimal(item['balance']) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)  # 수수료를 제외한 주문가능 금액
             
             if int(trade_cash) >= ord_amt:
             
@@ -328,7 +436,7 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     market="KRW-"+prd_nm,
                     side="bid",                     # 매수
                     volume=str(volume),             # 매수량
-                    price=str(price),               # 매수가격
+                    price=str(ord_amt) if ord_type == "price" else str(price),               # 시장가 : 매수금액, 지정가 : 매수가격
                     ord_type=ord_type               # 주문유형
                 )
             
@@ -337,109 +445,214 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                 if "uuid" in order_response:
                     ord_no  = order_response["uuid"]  # 주문 ID
                     time.sleep(1)
-                    order_status = bithumb_get_order(access_key, secret_key, ord_no)
-                    print("주문 상태:", order_status)
+                    # 시장가 매수 주문인 경우
+                    if ord_type == "price":
+                        
+                        # 주문관리정보 생성
+                        INSERT_TRADE_INFO = """
+                            INSERT INTO trade_mng (
+                                cust_num, 
+                                market_name, 
+                                ord_dtm, 
+                                ord_no, 
+                                prd_nm, 
+                                ord_tp,
+                                ord_state,
+                                ord_count,
+                                ord_expect_totamt,
+                                ord_price,
+                                ord_vol,
+                                ord_amt,
+                                cut_price,
+                                cut_rate,
+                                cut_amt,
+                                goal_price,
+                                goal_rate,
+                                goal_amt,
+                                margin_vol,
+                                executed_vol,
+                                remaining_vol,
+                                hold_price,
+                                hold_vol,
+                                paid_fee,
+                                regr_id, 
+                                reg_date, 
+                                chgr_id, 
+                                chg_date)
+                            VALUES (
+                                :cust_num, 
+                                :market_name, 
+                                :ord_dtm,
+                                :ord_no,
+                                :prd_nm,
+                                :ord_tp,
+                                :ord_state,
+                                :ord_count,
+                                :ord_expect_totamt,
+                                :ord_price,
+                                :ord_vol,
+                                :ord_amt,
+                                :cut_price,
+                                :cut_rate,
+                                :cut_amt,
+                                :goal_price,
+                                :goal_rate,
+                                :goal_amt,
+                                :margin_vol,
+                                :executed_vol,
+                                :remaining_vol,
+                                :hold_price,
+                                :hold_vol,
+                                :paid_fee,
+                                :regr_id,
+                                :reg_date,
+                                :chgr_id,
+                                :chg_date)
+                        """
+                        db.execute(text(INSERT_TRADE_INFO), {
+                            "cust_num": cust_info[0], 
+                            "market_name": market_name, 
+                            "ord_dtm": datetime.fromisoformat(order_response['created_at']).strftime("%Y%m%d%H%M%S"), 
+                            "ord_no": ord_no, 
+                            "prd_nm": "KRW-"+prd_nm,
+                            "ord_tp": "01",
+                            "ord_state": order_response['state'],
+                            "ord_count": 0,
+                            "ord_expect_totamt": 0,
+                            "ord_price": price,
+                            "ord_vol": volume,
+                            "ord_amt": ord_amt,
+                            "cut_price": 0,
+                            "cut_rate": 0,
+                            "cut_amt": 0,
+                            "goal_price": 0,
+                            "goal_rate": 0,
+                            "goal_amt": 0,
+                            "margin_vol": 0,
+                            "executed_vol": Decimal(order_response['executed_volume']),
+                            "remaining_vol": 0,
+                            "hold_price":hold_price,
+                            "hold_vol":hold_vol,
+                            "paid_fee": Decimal(order_response['paid_fee']),
+                            "regr_id": user_id,
+                            "reg_date": datetime.now(),
+                            "chgr_id": user_id,
+                            "chg_date": datetime.now()
+                            })
+                        db.commit()
 
-                    # 주문관리정보 생성
-                    INSERT_TRADE_INFO = """
-                        INSERT INTO trade_mng (
-                            cust_num, 
-                            market_name, 
-                            ord_dtm, 
-                            ord_no, 
-                            prd_nm, 
-                            ord_tp,
-                            ord_state,
-                            ord_count,
-                            ord_expect_totamt,
-                            ord_price,
-                            ord_vol,
-                            ord_amt,
-                            cut_price,
-                            cut_rate,
-                            cut_amt,
-                            goal_price,
-                            goal_rate,
-                            goal_amt,
-                            margin_vol,
-                            executed_vol,
-                            remaining_vol,
-                            hold_price,
-                            hold_vol,
-                            paid_fee,
-                            regr_id, 
-                            reg_date, 
-                            chgr_id, 
-                            chg_date)
-                        VALUES (
-                            :cust_num, 
-                            :market_name, 
-                            :ord_dtm,
-                            :ord_no,
-                            :prd_nm,
-                            :ord_tp,
-                            :ord_state,
-                            :ord_count,
-                            :ord_expect_totamt,
-                            :ord_price,
-                            :ord_vol,
-                            :ord_amt,
-                            :cut_price,
-                            :cut_rate,
-                            :cut_amt,
-                            :goal_price,
-                            :goal_rate,
-                            :goal_amt,
-                            :margin_vol,
-                            :executed_vol,
-                            :remaining_vol,
-                            :hold_price,
-                            :hold_vol,
-                            :paid_fee,
-                            :regr_id,
-                            :reg_date,
-                            :chgr_id,
-                            :chg_date)
-                    """
-                    db.execute(text(INSERT_TRADE_INFO), {
-                        "cust_num": cust_info[0], 
-                        "market_name": market_name, 
-                        "ord_dtm": datetime.fromisoformat(order_status['created_at']).strftime("%Y%m%d%H%M%S"), 
-                        "ord_no": ord_no, 
-                        "prd_nm": "KRW-"+prd_nm,
-                        "ord_tp": "01",
-                        "ord_state": order_status['state'],
-                        "ord_count": 0,
-                        "ord_expect_totamt": 0,
-                        "ord_price": price,
-                        "ord_vol": volume,
-                        "ord_amt": ord_amt,
-                        "cut_price": 0,
-                        "cut_rate": 0,
-                        "cut_amt": 0,
-                        "goal_price": 0,
-                        "goal_rate": 0,
-                        "goal_amt": 0,
-                        "margin_vol": 0,
-                        "executed_vol": Decimal(order_status['executed_volume']),
-                        "remaining_vol": Decimal(order_status['remaining_volume']),
-                        "hold_price":hold_price,
-                        "hold_vol":hold_vol,
-                        "paid_fee": Decimal(order_status['paid_fee']),
-                        "regr_id": user_id,
-                        "reg_date": datetime.now(),
-                        "chgr_id": user_id,
-                        "chg_date": datetime.now()
-                        })
-                    db.commit()
-                    
-                    summary = (
-                            f"*{prd_nm}*: {'매수' if order_status['side'] == 'bid' else '매도'} 주문 {order_status['state']} 상태\n"
-                            f"> 주문단가: {format_number(str(price))}\n"
-                            f"> 주문시간: {datetime.fromisoformat(order_status['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"> 주문량: {format_number(order_status['volume'])}, 채결량: {format_number(order_status['executed_volume'])}, 잔량: {format_number(order_status['remaining_volume'])}"
-                    )
-                    text_lines.append((summary, order_status['uuid']))
+                        summary = (
+                                f"*{prd_nm}*: {'매수' if order_response['side'] == 'bid' else '매도'} 주문 {order_response['state']} 상태\n"
+                                f"> 주문단가: {format_number(str(price))}\n"
+                                f"> 주문시간: {datetime.fromisoformat(order_response['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"> 주문량: {format_number(str(volume))}"
+                        )
+                        text_lines.append((summary, order_status['uuid']))
+                
+                    else:
+                        order_status = bithumb_get_order(access_key, secret_key, ord_no)
+                        print("주문 상태:", order_status)
+
+                        # 주문관리정보 생성
+                        INSERT_TRADE_INFO = """
+                            INSERT INTO trade_mng (
+                                cust_num, 
+                                market_name, 
+                                ord_dtm, 
+                                ord_no, 
+                                prd_nm, 
+                                ord_tp,
+                                ord_state,
+                                ord_count,
+                                ord_expect_totamt,
+                                ord_price,
+                                ord_vol,
+                                ord_amt,
+                                cut_price,
+                                cut_rate,
+                                cut_amt,
+                                goal_price,
+                                goal_rate,
+                                goal_amt,
+                                margin_vol,
+                                executed_vol,
+                                remaining_vol,
+                                hold_price,
+                                hold_vol,
+                                paid_fee,
+                                regr_id, 
+                                reg_date, 
+                                chgr_id, 
+                                chg_date)
+                            VALUES (
+                                :cust_num, 
+                                :market_name, 
+                                :ord_dtm,
+                                :ord_no,
+                                :prd_nm,
+                                :ord_tp,
+                                :ord_state,
+                                :ord_count,
+                                :ord_expect_totamt,
+                                :ord_price,
+                                :ord_vol,
+                                :ord_amt,
+                                :cut_price,
+                                :cut_rate,
+                                :cut_amt,
+                                :goal_price,
+                                :goal_rate,
+                                :goal_amt,
+                                :margin_vol,
+                                :executed_vol,
+                                :remaining_vol,
+                                :hold_price,
+                                :hold_vol,
+                                :paid_fee,
+                                :regr_id,
+                                :reg_date,
+                                :chgr_id,
+                                :chg_date)
+                        """
+                        db.execute(text(INSERT_TRADE_INFO), {
+                            "cust_num": cust_info[0], 
+                            "market_name": market_name, 
+                            "ord_dtm": datetime.fromisoformat(order_status['created_at']).strftime("%Y%m%d%H%M%S"), 
+                            "ord_no": ord_no, 
+                            "prd_nm": "KRW-"+prd_nm,
+                            "ord_tp": "01",
+                            "ord_state": order_status['state'],
+                            "ord_count": 0,
+                            "ord_expect_totamt": 0,
+                            "ord_price": price,
+                            "ord_vol": volume,
+                            "ord_amt": ord_amt,
+                            "cut_price": 0,
+                            "cut_rate": 0,
+                            "cut_amt": 0,
+                            "goal_price": 0,
+                            "goal_rate": 0,
+                            "goal_amt": 0,
+                            "margin_vol": 0,
+                            "executed_vol": Decimal(order_status['executed_volume']),
+                            "remaining_vol": Decimal(order_status['remaining_volume']),
+                            "hold_price":hold_price,
+                            "hold_vol":hold_vol,
+                            "paid_fee": Decimal(order_status['paid_fee']),
+                            "regr_id": user_id,
+                            "reg_date": datetime.now(),
+                            "chgr_id": user_id,
+                            "chg_date": datetime.now()
+                            })
+                        db.commit()
+                        
+                        summary = (
+                                f"*{prd_nm}*: {'매수' if order_status['side'] == 'bid' else '매도'} 주문 {order_status['state']} 상태\n"
+                                f"> 주문단가: {format_number(str(price))}\n"
+                                f"> 주문시간: {datetime.fromisoformat(order_status['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"> 주문량: {format_number(order_status['volume'])}, 채결량: {format_number(order_status['executed_volume'])}, 잔량: {format_number(order_status['remaining_volume'])}"
+                        )
+                        text_lines.append((summary, order_status['uuid']))
                 else:
                     text_lines.append(
                         f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"

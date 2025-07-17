@@ -1773,13 +1773,28 @@ def candle_minutes_info(market, market_name, api_url, in_minutes):
     return is_breakdown
 
 def place_order(access_key, secret_key, market, side, volume, price, ord_type):
-    params= {
-        'market': market,       # 마켓 ID
-        'side': side,           # bid : 매수, ask : 매도
-        'ord_type': ord_type,   # limit : 지정가 주문, price : 시장가 매수, market : 시장가 매도, best : 최유리 주문
-        'price': price,         # 호가 매수
-        'volume': volume        # 주문량
-    }
+    if ord_type == "price":
+        params= {
+            'market': market,       # 마켓 ID
+            'side': side,           # bid : 매수, ask : 매도
+            'ord_type': ord_type,   # limit : 지정가 주문, price : 시장가 매수, market : 시장가 매도, best : 최유리 주문
+            'price': price          # 호가 매수
+        }
+    elif ord_type == "market":
+        params= {
+            'market': market,       # 마켓 ID
+            'side': side,           # bid : 매수, ask : 매도
+            'ord_type': ord_type,   # limit : 지정가 주문, price : 시장가 매수, market : 시장가 매도, best : 최유리 주문
+            'volume': volume        # 주문량
+        }
+    else:
+        params= {
+            'market': market,       # 마켓 ID
+            'side': side,           # bid : 매수, ask : 매도
+            'ord_type': ord_type,   # limit : 지정가 주문, price : 시장가 매수, market : 시장가 매도, best : 최유리 주문
+            'price': price,         # 호가 매수
+            'volume': volume        # 주문량
+        }        
     print(params)
     query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
 
@@ -1806,7 +1821,12 @@ def place_order(access_key, secret_key, market, side, volume, price, ord_type):
     return res.json()
 
 def bithumb_order(access_key, secret_key, market, side, volume, price, ord_type):
-    requestBody = dict( market=market, side=side, volume=volume, price=price, ord_type=ord_type)
+    if ord_type == "price":
+        requestBody = dict( market=market, side=side, price=price, ord_type=ord_type)
+    elif ord_type == "market":
+        requestBody = dict( market=market, side=side, volume=volume, ord_type=ord_type)
+    else:
+        requestBody = dict( market=market, side=side, volume=volume, price=price, ord_type=ord_type)
 
     # Generate access token
     query = urlencode(requestBody).encode()
