@@ -823,7 +823,7 @@ async def slack_interactivity(request: Request):
         value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
         
         sell_buttons = []
-        for text, action_id in [("전체 매도", "all_sell_action"), ("절반 매도", "half_sell_action"), ("현재가 매도", "direct_sell_action"), ("매도량 매도가", "custom_sell_action")]:
+        for text, action_id in [("전체 매도", "all_sell_action"), ("66% 매도", "66_sell_action"), ("절반 매도", "half_sell_action"), ("33% 매도", "33_sell_action"), ("25% 매도", "25_sell_action"), ("20% 매도", "20_sell_action"), ("현재가 매도", "direct_sell_action"), ("매도량 매도가", "custom_sell_action")]:
             value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
             sell_buttons.append({
                 "type": "button",
@@ -911,6 +911,66 @@ async def slack_interactivity(request: Request):
             ]
         }
     
+    elif action_id == "66_sell_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "66"})
+        
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "price_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "매도가를 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "매도가"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "66% 매도",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "sell_proc"
+                        }
+                    ]
+                }
+            ]
+        } 
+    
     elif action_id == "half_sell_action":
         selection = json.loads(payload["actions"][0]["value"])
         market_name = selection["market_name"]
@@ -971,6 +1031,186 @@ async def slack_interactivity(request: Request):
             ]
         }    
     
+    elif action_id == "33_sell_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "33"})
+        
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "price_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "매도가를 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "매도가"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "33% 매도",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "sell_proc"
+                        }
+                    ]
+                }
+            ]
+        }
+        
+    elif action_id == "25_sell_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "25"})
+        
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "price_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "매도가를 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "매도가"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "25% 매도",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "sell_proc"
+                        }
+                    ]
+                }
+            ]
+        }
+        
+    elif action_id == "20_sell_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "20"})
+        
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "price_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "매도가를 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "매도가"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "20% 매도",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "sell_proc"
+                        }
+                    ]
+                }
+            ]
+        }           
+    
     elif action_id == "direct_sell_action":
         selection = json.loads(payload["actions"][0]["value"])
         market_name = selection["market_name"]
@@ -999,18 +1239,18 @@ async def slack_interactivity(request: Request):
                 },
                 {
                     "type": "input",
-                    "block_id": "volumn_input_block",
+                    "block_id": "volumn_rate_input_block",
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "input_volumn",
+                        "action_id": "input_volumn_rate",
                         "placeholder": {
                             "type": "plain_text",
-                            "text": "매도량를 입력해주세요"
+                            "text": "매도비율(%)을 입력해주세요"
                         }
                     },
                     "label": {
                         "type": "plain_text",
-                        "text": "매도량"
+                        "text": "매도비율(%)"
                     }
                 },
                 {
@@ -1115,6 +1355,7 @@ async def slack_interactivity(request: Request):
         state_values = payload["state"]["values"]
         prd_nm = None
         price = None
+        custom_volumn_rate = None
         custom_volumn = None
 
         try:
@@ -1147,6 +1388,23 @@ async def slack_interactivity(request: Request):
                     if price < 0:
                         raise ValueError("매도가는 0 이상의 숫자여야 합니다.")
                 
+                if "input_volumn_rate" in block:
+                    volumn_input_rate = block["input_volumn_rate"]["value"]
+                    
+                    # 유효성 검사
+                    if not volumn_input_rate:
+                        raise ValueError("매도비율(%)을 입력해주세요.")
+                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
+                    if not re.fullmatch(r"\d+(\.\d{1,5})?", volumn_input_rate):
+                        raise ValueError("매도비율(%)은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
+
+                    # 문자열을 float으로 변환
+                    custom_volumn_rate = float(volumn_input_rate)
+
+                    # 0 이상의 값인지 확인
+                    if custom_volumn_rate < 0:
+                        raise ValueError("매도비율(%)은 0 이상의 숫자여야 합니다.")
+                
                 if "input_volumn" in block:
                     volumn_input = block["input_volumn"]["value"]
                     
@@ -1165,7 +1423,7 @@ async def slack_interactivity(request: Request):
                         raise ValueError("매도량은 0 이상의 숫자여야 합니다.")    
 
             # 매도 처리
-            order_info = sell_proc(cust_nm=cust_nm, market_name=market_name, gubun=gubun, prd_nm=prd_nm, price=price, custom_volumn=custom_volumn)
+            order_info = sell_proc(cust_nm=cust_nm, market_name=market_name, gubun=gubun, prd_nm=prd_nm, price=price, custom_volumn_rate=custom_volumn_rate, custom_volumn=custom_volumn)
             blocks = build_blocks(order_info, market_name, cust_nm)
             
             message = {
