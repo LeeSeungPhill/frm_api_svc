@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 import os
 from sqlalchemy import text
-from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN
+from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, InvalidOperation
 from typing import Optional
 
 upbit_api_url = os.getenv("UPBIT_API")
@@ -162,7 +162,15 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     if Decimal(item['balance']) == 0:
                         trade_cash = Decimal('0')
                     else:
-                        trade_cash = (Decimal(item['balance']) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)  # 수수료를 제외한 주문가능 금액
+                        getcontext().prec = 28  # 정밀도 설정 (기본은 28자리)
+
+                        try:
+                            balance_str = str(item['balance'])  # Decimal은 문자열로 받는 것이 가장 안전
+                            balance_decimal = Decimal(balance_str)
+                            # 수수료를 제외한 주문가능 금액
+                            trade_cash = (balance_decimal * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+                        except InvalidOperation as e:
+                            print(f"잘못된 Decimal 연산: {item['balance']} → {e}")
             
             # 주문금액보다 주문가능 금액이 더 큰 경우
             if int(trade_cash) >= ord_amt:
@@ -289,14 +297,12 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     )
                     text_lines.append((summary, order_status['uuid']))
                 else:
-                    text_lines.append(
-                        f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"
-                    )
+                    fail_text = f"*{prd_nm} : 매수 주문 실패했습니다.* => {order_response['error']['message']}"
+                    text_lines.append({"text": fail_text, "order_no": ""})        
             
             else:
-                text_lines.append(
-                    f"*{prd_nm} : 매수 가능 현금이 부족합니다.*"
-                )
+                fail_text = f"*{prd_nm} : 매수 가능 현금이 부족합니다.*"
+                text_lines.append({"text": fail_text, "order_no": ""})                           
         
         elif market_name == 'BITHUMB':
             
@@ -327,7 +333,15 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     if Decimal(item['balance']) == 0:
                         trade_cash = Decimal('0')
                     else:
-                        trade_cash = (Decimal(item['balance']) * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)  # 수수료를 제외한 주문가능 금액
+                        getcontext().prec = 28  # 정밀도 설정 (기본은 28자리)
+
+                        try:
+                            balance_str = str(item['balance'])  # Decimal은 문자열로 받는 것이 가장 안전
+                            balance_decimal = Decimal(balance_str)
+                            # 수수료를 제외한 주문가능 금액
+                            trade_cash = (balance_decimal * Decimal('0.9995')).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
+                        except InvalidOperation as e:
+                            print(f"잘못된 Decimal 연산: {item['balance']} → {e}")
             
             # 주문금액보다 주문가능 금액이 더 큰 경우
             if int(trade_cash) >= ord_amt:
@@ -454,14 +468,12 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     )
                     text_lines.append((summary, order_status['uuid']))
                 else:
-                    text_lines.append(
-                        f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"
-                    )
+                    fail_text = f"*{prd_nm} : 매수 주문 실패했습니다.* => {order_response['error']['message']}"
+                    text_lines.append({"text": fail_text, "order_no": ""})                   
                     
             else:
-                text_lines.append(
-                    f"*{prd_nm} : 매수 가능 현금이 부족합니다.*"
-                )                      
+                fail_text = f"*{prd_nm} : 매수 가능 현금이 부족합니다.*"
+                text_lines.append({"text": fail_text, "order_no": ""})                           
 
         return text_lines if text_lines else text_lines.append(('', ''))
     except Exception as e:
@@ -647,9 +659,8 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
                         )
                         text_lines.append((summary, order_status['uuid']))
                     else:
-                        text_lines.append(
-                            f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"
-                        )
+                        fail_text = f"*{prd_nm} : 매도 주문 실패했습니다.* => {order_response['error']['message']}"
+                        text_lines.append({"text": fail_text, "order_no": ""})
 
                 elif market_name == 'BITHUMB':
                     order_response = bithumb_order(
@@ -774,19 +785,16 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
                         )
                         text_lines.append((summary, order_status['uuid']))
                     else:
-                        text_lines.append(
-                            f"*{prd_nm} : 주문 실패했습니다.*=> {order_response}"
-                        )
+                        fail_text = f"*{prd_nm} : 매도 주문 실패했습니다.* => {order_response['error']['message']}"
+                        text_lines.append({"text": fail_text, "order_no": ""})
                     
             else:
-                text_lines.append(
-                    f"*{prd_nm} : 매도 가능 수량 부족합니다.*"
-                )
+                fail_text = f"*{prd_nm} : 매도 가능 수량 부족합니다.*"
+                text_lines.append({"text": fail_text, "order_no": ""})
         
         else:
-            text_lines.append(
-                f"*{prd_nm} : 매도 가능 상품이 미존재합니다.*"
-            )                        
+            fail_text = f"*{prd_nm} : 매도 가능 상품이 미존재합니다.*"
+            text_lines.append({"text": fail_text, "order_no": ""})                        
 
         return text_lines if text_lines else text_lines.append(('', ''))
     except Exception as e:
@@ -1182,9 +1190,8 @@ def order_update(cust_nm: str, market_name: str, order_no: str, price: float) ->
             )
             text_lines.append((summary, response['new_order_uuid']))
         else:
-            text_lines.append(
-                f"*{prd_nm} : 주문 실패했습니다.*=> {response}"
-            )
+            fail_text = f"*주문 취소 후 재주문 실패했습니다.* => {response['error']['message']}"
+            text_lines.append({"text": fail_text, "order_no": ""})
 
         return text_lines if text_lines else text_lines.append(('', ''))
     except Exception as e:
