@@ -1,7 +1,4 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     // "configurations": [
     //     {
@@ -17,17 +14,32 @@
     //         "jinja": true
     //     }
     // ]
+    // "configurations": [
+    //     {
+    //         "name": "Python Debugger: FastAPI",
+    //         "type": "debugpy",
+    //         "request": "launch",
+    //         "module": "uvicorn",
+    //         "args": [
+    //             "main:app",
+    //             "--reload",
+    //         ],
+    //         "jinja": true
+    //     }
+    // ]
     "configurations": [
         {
-            "name": "Python Debugger: FastAPI",
+            "name": "Uvicorn (my_venv)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
             "args": [
                 "main:app",
                 "--reload",
+                "--port", "8001"
             ],
-            "jinja": true
+            "console": "integratedTerminal",
+            "python": "/home/terra/.virtualenvs/my_venv/bin/python"
         }
     ]
 }
