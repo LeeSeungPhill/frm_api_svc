@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from routers import cust_mng as cust_mng_router
 from routers import trade_mng as trade_mng_router
 import click
+import subprocess
 from montecarlo import montecarlo as montecarlo_
 
 app = FastAPI()
@@ -172,44 +173,65 @@ async def slack_command(request: Request):
     text = form.get("text")
     user_id = form.get("user_id")
 
-    # Slack으로 인터랙티브 버튼 리턴
-    return JSONResponse(
-        content={
-            "response_type": "ephemeral",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "UPBIT",
-                            },
-                            "value": "UPBIT",
-                            "action_id": "select_upbit"
-                        },
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "BITHUMB",
-                            },
-                            "value": "BITHUMB",
-                            "action_id": "select_bithumb"
+    if command == "/info":
+        log_file = "/home/terra/streamlit_log/universe_tunnel.log"
+        try:
+            # grep으로 URL만 추출, tail -1로 마지막 URL 가져오기
+            result = subprocess.check_output(
+                f"grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' {log_file} | tail -1",
+                shell=True
+            ).decode().strip()
+
+            if not result:
+                result = "현재 cloudflared 임시 URL을 찾을 수 없습니다."
+
+        except Exception as e:
+            result = f"URL 조회 실패: {e}"
+
+        return JSONResponse({
+            "response_type": "in_channel",
+            "text": f"🌐 Universe Balance Info 접속 URL: {result}"
+        })
+    
+    else:
+        # Slack으로 인터랙티브 버튼 리턴
+        return JSONResponse(
+            content={
+                "response_type": "ephemeral",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"
                         }
-                    ]
-                }
-            ]
-        }
-    )
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "UPBIT",
+                                },
+                                "value": "UPBIT",
+                                "action_id": "select_upbit"
+                            },
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "BITHUMB",
+                                },
+                                "value": "BITHUMB",
+                                "action_id": "select_bithumb"
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
 
 # 버튼 클릭 이벤트 처리
 @app.post("/slack/interactivity")
