@@ -174,7 +174,7 @@ async def slack_command(request: Request):
     user_id = form.get("user_id")
 
     if command == "/info":
-        log_file = "/home/terra/streamlit_log/universe_tunnel.log"
+        log_file = "/home/terra/cloudflared/universe_tunnel.log"
         try:
             # grep으로 URL만 추출, tail -1로 마지막 URL 가져오기
             result = subprocess.check_output(
