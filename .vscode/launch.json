@@ -39,7 +39,7 @@
                 "--port", "8001"
             ],
             "console": "integratedTerminal",
-            "python": "/home/terra/.virtualenvs/my_venv/bin/python"
+            "python": "/home/terra/my_venv/311/bin/python"
         }
     ]
 }
