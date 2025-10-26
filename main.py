@@ -1518,7 +1518,7 @@ async def slack_interactivity(request: Request):
                         "action_id": "input_price",
                         "placeholder": {
                             "type": "plain_text",
-                            "text": "매매가를 입력해주세요"
+                            "text": "매매가(시장가:0)를 입력해주세요"
                         }
                     },
                     "label": {

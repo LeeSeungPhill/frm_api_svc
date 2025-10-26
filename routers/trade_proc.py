@@ -13,6 +13,8 @@ import os
 from sqlalchemy import text
 from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, InvalidOperation
 from typing import Optional
+from typing import List, Tuple, Optional
+from sqlalchemy.sql import text
 
 upbit_api_url = os.getenv("UPBIT_API")
 bithumb_api_url = os.getenv("BITHUMB_API")
@@ -1039,12 +1041,40 @@ def order_update(cust_nm: str, market_name: str, order_no: str, price: float) ->
 
         text_lines = []
         
-        params = {
-            'prev_order_uuid': order_no,
-            'new_ord_type': 'limit',
-            'new_price': str(price),
-            'new_volume': 'remain_only',
-        }
+        pre_order_info = get_order(access_key, secret_key, order_no)
+        print("주문정정 이전 주문 :", pre_order_info)
+
+        # 시장가 매매인 경우
+        if price == 0:
+
+            # 시장가 매수
+            if pre_order_info['side'] == 'bid':
+
+                # 시장가 매수 총액
+                buy_sum = Decimal(pre_order_info['price']) * Decimal(pre_order_info['remaining_volume'])
+
+                params = {
+                    'prev_order_uuid': order_no,
+                    'new_ord_type': 'price',
+                    'new_price': str(buy_sum),
+                }
+
+            else:
+
+                params = {
+                    'prev_order_uuid': order_no,
+                    'new_ord_type': 'market',
+                    'new_volume': 'remain_only',
+                }
+
+        else:
+
+            params = {
+                'prev_order_uuid': order_no,
+                'new_ord_type': 'limit',
+                'new_price': str(price),
+                'new_volume': 'remain_only',
+            }
         
         query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
 
@@ -1287,10 +1317,6 @@ def order_cancel(cust_nm: str, market_name: str, order_no: str) -> str:
     finally:
         db.close()
         
-from typing import List, Tuple, Optional
-from datetime import datetime
-from sqlalchemy.sql import text
-
 def get_order_close(
     cust_nm: str,
     market_name: str,
