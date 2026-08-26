@@ -1317,6 +1317,167 @@ def order_cancel(cust_nm: str, market_name: str, order_no: str) -> str:
     finally:
         db.close()
         
+def holding_update(cust_nm: str, market_name: str, prd_nm: str, loss_price: Optional[float] = None, target_price: Optional[float] = None, exit_price: Optional[float] = None, trading_plan: Optional[str] = None) -> str:
+    db = SessionLocal()
+    try:
+        # 고객명에 의한 고객정보 조회
+        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+
+        # 보유종목 정보 변경 (미입력 가격 항목은 기존값 유지, 매매계획은 선택값으로 변경)
+        UPDATE_BALANCE_INFO = """
+            UPDATE balance_info
+            SET
+                loss_price = COALESCE(:loss_price, loss_price),
+                target_price = COALESCE(:target_price, target_price),
+                exit_price = COALESCE(:exit_price, exit_price),
+                trading_plan = :trading_plan,
+                chgr_id = :chgr_id,
+                chg_date = :chg_date
+            WHERE cust_num = :cust_num
+            AND market_name = :market_name
+            AND prd_nm = :prd_nm
+        """
+        result = db.execute(text(UPDATE_BALANCE_INFO), {
+            "cust_num": cust_info[0],
+            "market_name": market_name,
+            "prd_nm": prd_nm,
+            "loss_price": loss_price,
+            "target_price": target_price,
+            "exit_price": exit_price,
+            "trading_plan": trading_plan,
+            "chgr_id": user_id,
+            "chg_date": datetime.now(),
+            })
+
+        if result.rowcount < 1:
+            db.rollback()
+            return f"*{prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm}* 보유 잔고 정보가 존재하지 않습니다."
+
+        db.commit()
+
+        return f"*{prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm}* 보유종목 정보가 변경되었습니다."
+    except Exception as e:
+        return f"보유종목 정보 변경 실패: {e}"
+    finally:
+        db.close()
+
+def get_interest_list(market_name: str) -> str:
+    db = SessionLocal()
+    try:
+        SELECT_INTEREST_LIST = """
+            SELECT DISTINCT ON (prd_nm)
+                prd_nm, through_price, leave_price, resist_price, support_price,
+                trend_high_price, trend_low_price, proc_yn, last_chg_date
+            FROM bit_interest_item
+            WHERE market_name = :market_name
+            ORDER BY prd_nm, interest_day DESC, interest_dtm DESC
+        """
+        result = db.execute(text(SELECT_INTEREST_LIST), {"market_name": market_name}).mappings().all()
+
+        text_lines = []
+        for item in result:
+            prd_nm = item['prd_nm'].split('-')[-1] if item['prd_nm'] and '-' in item['prd_nm'] else item['prd_nm']
+            text_lines.append(
+                f"*{prd_nm}*: {'처리완료' if item['proc_yn'] == 'Y' else '관심등록'}\n"
+                f"> 돌파가: {format_number(item['through_price']) if item['through_price'] is not None else '-'}, "
+                f"이탈가: {format_number(item['leave_price']) if item['leave_price'] is not None else '-'}\n"
+                f"> 저항가: {format_number(item['resist_price']) if item['resist_price'] is not None else '-'}, "
+                f"지지가: {format_number(item['support_price']) if item['support_price'] is not None else '-'}\n"
+                f"> 추세고가: {format_number(item['trend_high_price']) if item['trend_high_price'] is not None else '-'}, "
+                f"추세저가: {format_number(item['trend_low_price']) if item['trend_low_price'] is not None else '-'}\n"
+                f"> 최종변경일시: {item['last_chg_date'].strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+        return "\n".join(text_lines) if text_lines else "등록된 관심종목이 없습니다."
+    except Exception as e:
+        return f"관심종목 조회 실패: {e}"
+    finally:
+        db.close()
+
+def interest_update(cust_nm: str = None, market_name: str = None, prd_nm: str = None, through_price: Optional[float] = None, leave_price: Optional[float] = None, resist_price: Optional[float] = None, support_price: Optional[float] = None, trend_high_price: Optional[float] = None, trend_low_price: Optional[float] = None) -> str:
+    db = SessionLocal()
+    try:
+        now = datetime.now()
+
+        # market_name, prd_nm 기준 기존 등록된 관심종목(최신 스냅샷) 조회
+        SELECT_LATEST_INTEREST = """
+            SELECT interest_day, interest_dtm
+            FROM bit_interest_item
+            WHERE market_name = :market_name
+            AND prd_nm = :prd_nm
+            ORDER BY interest_day DESC, interest_dtm DESC
+            LIMIT 1
+        """
+        latest = db.execute(text(SELECT_LATEST_INTEREST), {"market_name": market_name, "prd_nm": prd_nm}).mappings().first()
+
+        if latest:
+            # 기존 관심종목 변경 처리 (미입력 항목은 기존값 유지)
+            UPDATE_INTEREST = """
+                UPDATE bit_interest_item
+                SET
+                    through_price = COALESCE(:through_price, through_price),
+                    leave_price = COALESCE(:leave_price, leave_price),
+                    resist_price = COALESCE(:resist_price, resist_price),
+                    support_price = COALESCE(:support_price, support_price),
+                    trend_high_price = COALESCE(:trend_high_price, trend_high_price),
+                    trend_low_price = COALESCE(:trend_low_price, trend_low_price),
+                    last_chg_date = :last_chg_date
+                WHERE market_name = :market_name
+                AND prd_nm = :prd_nm
+                AND interest_day = :interest_day
+                AND interest_dtm = :interest_dtm
+            """
+            db.execute(text(UPDATE_INTEREST), {
+                "market_name": market_name,
+                "prd_nm": prd_nm,
+                "interest_day": latest["interest_day"],
+                "interest_dtm": latest["interest_dtm"],
+                "through_price": through_price,
+                "leave_price": leave_price,
+                "resist_price": resist_price,
+                "support_price": support_price,
+                "trend_high_price": trend_high_price,
+                "trend_low_price": trend_low_price,
+                "last_chg_date": now,
+                })
+            db.commit()
+
+            result_gubun = "변경"
+        else:
+            # 신규 관심종목 등록
+            INSERT_INTEREST = """
+                INSERT INTO bit_interest_item (
+                    market_name, prd_nm, interest_day, interest_dtm,
+                    through_price, leave_price, resist_price, support_price,
+                    trend_high_price, trend_low_price, proc_yn, last_chg_date)
+                VALUES (
+                    :market_name, :prd_nm, :interest_day, :interest_dtm,
+                    :through_price, :leave_price, :resist_price, :support_price,
+                    :trend_high_price, :trend_low_price, 'N', :last_chg_date)
+            """
+            db.execute(text(INSERT_INTEREST), {
+                "market_name": market_name,
+                "prd_nm": prd_nm,
+                "interest_day": now.strftime("%Y%m%d"),
+                "interest_dtm": now.strftime("%H%M%S"),
+                "through_price": through_price,
+                "leave_price": leave_price,
+                "resist_price": resist_price,
+                "support_price": support_price,
+                "trend_high_price": trend_high_price,
+                "trend_low_price": trend_low_price,
+                "last_chg_date": now,
+                })
+            db.commit()
+
+            result_gubun = "등록"
+
+        return f"*{prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm}* 관심종목이 {result_gubun}되었습니다."
+    except Exception as e:
+        return f"관심종목 등록/변경 실패: {e}"
+    finally:
+        db.close()
+
 def get_order_close(
     cust_nm: str,
     market_name: str,

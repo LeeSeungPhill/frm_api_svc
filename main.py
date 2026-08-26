@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, holding_update
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 # from routers import auth as auth_router
 from routers import cust_mng as cust_mng_router
 from routers import trade_mng as trade_mng_router
+# from routers import bodo_mng as bodo_mng_router
 import click
 import subprocess
 from montecarlo import montecarlo as montecarlo_
@@ -19,6 +20,7 @@ app = FastAPI()
 # app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 app.include_router(cust_mng_router.router, prefix="/api/cust_mng", tags=["cust_mng"])
 app.include_router(trade_mng_router.router, prefix="/api/trade_mng", tags=["trade_mng"])
+# app.include_router(bodo_mng_router.router, prefix="/api/bodo_mng", tags=["bodo_mng"])
 
 MAX_BLOCKS = 50
 MAX_VALUE_LENGTH = 2000
@@ -165,6 +167,19 @@ def decode_value(encoded_str: str) -> dict:
         print(f"[decode_value] 디코딩 실패: {e}")
         return {}
 
+def parse_optional_price(value: Optional[str], label: str) -> Optional[float]:
+    """
+    비어있으면 None, 값이 있으면 유효성 검사 후 float으로 변환.
+    """
+    if not value:
+        return None
+    if not re.fullmatch(r"\d+(\.\d{1,5})?", value):
+        raise ValueError(f"{label}는 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
+    price = float(value)
+    if price < 0:
+        raise ValueError(f"{label}는 0 이상의 숫자여야 합니다.")
+    return price
+
 # Slash Command 처리
 @app.post("/slack/command")
 async def slack_command(request: Request):
@@ -285,7 +300,7 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
         
         action_buttons = []
-        for text, action_id in [("잔고정보", "balance_action"), ("매매관리", "mng_action"), ("매매계획", "plan_action")]:
+        for text, action_id in [("잔고정보", "balance_action"), ("매매관리", "mng_action"), ("매매계획", "plan_action"), ("관심종목", "interest_action")]:
             value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
             action_buttons.append({
                 "type": "button",
@@ -310,10 +325,44 @@ async def slack_interactivity(request: Request):
         market_name = selection["market_name"]
         cust_nm = selection["cust_nm"]
 
+        balance_buttons = []
+        for text, action_id in [("잔고 조회", "balance_list_action"), ("보유종목 수정", "holding_update_action")]:
+            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
+            balance_buttons.append({
+                "type": "button",
+                "text": { "type": "plain_text", "text": text },
+                "value": value,
+                "action_id": action_id
+            })
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"*[{market_name}] {cust_nm}*의 잔고정보 관리를 선택하세요.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "잔고정보 처리를 선택하세요"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": balance_buttons
+                }
+            ]
+        }
+
+    elif action_id == "balance_list_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+
         try:
             # 잔고 조회
             balance_list = get_balance(cust_nm=cust_nm, market_name=market_name)
-            
+
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
@@ -324,6 +373,464 @@ async def slack_interactivity(request: Request):
                 "response_type": "ephemeral",
                 "replace_original": True,
                 "text": f"*[{market_name}] [{cust_nm}] 잔고정보 조회 중 오류 발생* : {e}"
+            }
+
+    elif action_id == "holding_update_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "loss_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_loss_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "이탈가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "이탈가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "target_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_target_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "목표가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "목표가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "exit_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_exit_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "최종이탈가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "최종이탈가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "trading_plan_input_block",
+                    "element": {
+                        "type": "static_select",
+                        "action_id": "input_trading_plan",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "매매계획을 선택해주세요"
+                        },
+                        "options": [
+                            {
+                                "text": { "type": "plain_text", "text": "홀딩" },
+                                "value": "h"
+                            },
+                            {
+                                "text": { "type": "plain_text", "text": "투자" },
+                                "value": "i"
+                            },
+                            {
+                                "text": { "type": "plain_text", "text": "일반" },
+                                "value": "NULL"
+                            }
+                        ]
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "매매계획"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "보유종목 수정",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "holding_update_proc"
+                        }
+                    ]
+                }
+            ]
+        }
+
+    elif action_id == "holding_update_proc":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        state_values = payload["state"]["values"]
+        prd_nm = None
+        loss_price = None
+        target_price = None
+        exit_price = None
+        trading_plan = None
+
+        try:
+            for block_id, block in state_values.items():
+                if "input_prd_nm" in block:
+                    prd_nm = block["input_prd_nm"]["value"]
+
+                    # 유효성 검사
+                    if not prd_nm:
+                        raise ValueError("상품명을 입력해주세요.")
+                    # 영문 대문자만 허용 (소문자는 upper 처리)
+                    if not re.fullmatch(r'[A-Za-z]+', prd_nm):
+                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
+                    prd_nm = prd_nm.upper()
+
+                if "input_loss_price" in block:
+                    loss_price = parse_optional_price(block["input_loss_price"]["value"], "이탈가")
+
+                if "input_target_price" in block:
+                    target_price = parse_optional_price(block["input_target_price"]["value"], "목표가")
+
+                if "input_exit_price" in block:
+                    exit_price = parse_optional_price(block["input_exit_price"]["value"], "최종이탈가")
+
+                if "input_trading_plan" in block:
+                    selected_option = block["input_trading_plan"].get("selected_option")
+
+                    # 유효성 검사
+                    if not selected_option:
+                        raise ValueError("매매계획을 선택해주세요.")
+                    trading_plan = None if selected_option["value"] == "NULL" else selected_option["value"]
+
+            # 보유종목 정보 변경
+            result = holding_update(
+                cust_nm=cust_nm,
+                market_name=market_name,
+                prd_nm="KRW-" + prd_nm,
+                loss_price=loss_price,
+                target_price=target_price,
+                exit_price=exit_price,
+                trading_plan=trading_plan
+            )
+
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] [{cust_nm}] 보유종목 수정*\n{result}"
+            }
+        except Exception as e:
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] [{cust_nm}] 보유종목 수정 중 오류 발생* : {e}"
+            }
+
+    elif action_id == "interest_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+
+        interest_buttons = []
+        for text, action_id in [("관심종목 조회", "interest_list_action"), ("관심종목 수정", "interest_update_action")]:
+            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
+            interest_buttons.append({
+                "type": "button",
+                "text": { "type": "plain_text", "text": text },
+                "value": value,
+                "action_id": action_id
+            })
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": f"*[{market_name}] {cust_nm}*의 관심종목 관리를 선택하세요.",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "관심종목 처리를 선택하세요"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": interest_buttons
+                }
+            ]
+        }
+
+    elif action_id == "interest_list_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+
+        try:
+            # 관심종목 조회
+            interest_list = get_interest_list(market_name=market_name)
+
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] 관심종목 조회*\n{interest_list}"
+            }
+        except Exception as e:
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] 관심종목 조회 중 오류 발생* : {e}"
+            }
+
+    elif action_id == "interest_update_action":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "prd_nm_input_block",
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_prd_nm",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "상품명을 입력해주세요"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "상품명"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "through_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_through_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "돌파가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "돌파가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "leave_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_leave_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "이탈가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "이탈가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "resist_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_resist_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "저항가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "저항가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "support_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_support_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "지지가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "지지가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "trend_high_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_trend_high_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "추세고가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "추세고가"
+                    }
+                },
+                {
+                    "type": "input",
+                    "block_id": "trend_low_price_input_block",
+                    "optional": True,
+                    "element": {
+                        "type": "plain_text_input",
+                        "action_id": "input_trend_low_price",
+                        "placeholder": {
+                            "type": "plain_text",
+                            "text": "추세저가를 입력해주세요 (선택)"
+                        }
+                    },
+                    "label": {
+                        "type": "plain_text",
+                        "text": "추세저가"
+                    }
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "관심종목 등록",
+                                "emoji": True
+                            },
+                            "value": value,
+                            "action_id": "interest_update_proc"
+                        }
+                    ]
+                }
+            ]
+        }
+
+    elif action_id == "interest_update_proc":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name = selection["market_name"]
+        cust_nm = selection["cust_nm"]
+        state_values = payload["state"]["values"]
+        prd_nm = None
+        through_price = None
+        leave_price = None
+        resist_price = None
+        support_price = None
+        trend_high_price = None
+        trend_low_price = None
+
+        try:
+            for block_id, block in state_values.items():
+                if "input_prd_nm" in block:
+                    prd_nm = block["input_prd_nm"]["value"]
+
+                    # 유효성 검사
+                    if not prd_nm:
+                        raise ValueError("상품명을 입력해주세요.")
+                    # 영문 대문자만 허용 (소문자는 upper 처리)
+                    if not re.fullmatch(r'[A-Za-z]+', prd_nm):
+                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
+                    prd_nm = prd_nm.upper()
+
+                if "input_through_price" in block:
+                    through_price = parse_optional_price(block["input_through_price"]["value"], "돌파가")
+
+                if "input_leave_price" in block:
+                    leave_price = parse_optional_price(block["input_leave_price"]["value"], "이탈가")
+
+                if "input_resist_price" in block:
+                    resist_price = parse_optional_price(block["input_resist_price"]["value"], "저항가")
+
+                if "input_support_price" in block:
+                    support_price = parse_optional_price(block["input_support_price"]["value"], "지지가")
+
+                if "input_trend_high_price" in block:
+                    trend_high_price = parse_optional_price(block["input_trend_high_price"]["value"], "추세고가")
+
+                if "input_trend_low_price" in block:
+                    trend_low_price = parse_optional_price(block["input_trend_low_price"]["value"], "추세저가")
+
+            # 관심종목 등록
+            result = interest_update(
+                market_name=market_name,
+                prd_nm="KRW-" + prd_nm,
+                through_price=through_price,
+                leave_price=leave_price,
+                resist_price=resist_price,
+                support_price=support_price,
+                trend_high_price=trend_high_price,
+                trend_low_price=trend_low_price
+            )
+
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] 관심종목 등록/수정*\n{result}"
+            }
+        except Exception as e:
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] 관심종목 등록/수정 중 오류 발생* : {e}"
             }
 
     elif action_id == "mng_action":
