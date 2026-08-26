@@ -1317,6 +1317,30 @@ def order_cancel(cust_nm: str, market_name: str, order_no: str) -> str:
     finally:
         db.close()
         
+def get_holding_prd_list(cust_nm: str, market_name: str) -> List[str]:
+    db = SessionLocal()
+    try:
+        # 고객명에 의한 고객정보 조회
+        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+
+        SELECT_HOLDING_LIST = """
+            SELECT prd_nm
+            FROM balance_info
+            WHERE cust_num = :cust_num
+            AND market_name = :market_name
+            AND prd_nm != 'KRW-KRW'
+            AND hold_volume > 0
+            ORDER BY prd_nm
+        """
+        result = db.execute(text(SELECT_HOLDING_LIST), {"cust_num": cust_info[0], "market_name": market_name}).mappings().all()
+
+        return [item['prd_nm'] for item in result]
+    except Exception as e:
+        print(f"[get_holding_prd_list] 조회 실패: {e}")
+        return []
+    finally:
+        db.close()
+
 def holding_update(cust_nm: str, market_name: str, prd_nm: str, loss_price: Optional[float] = None, target_price: Optional[float] = None, exit_price: Optional[float] = None, trading_plan: Optional[str] = None) -> str:
     db = SessionLocal()
     try:
