@@ -189,17 +189,12 @@ async def slack_command(request: Request):
     user_id = form.get("user_id")
 
     if command == "/info":
-        log_file = "/home/terra/log/tunnel/universe_tunnel.log"
+        url_file = "/home/terra/log/tunnel/universe_tunnel_url.txt"
         try:
-            # grep으로 URL만 추출, tail -1로 마지막 URL 가져오기
-            result = subprocess.check_output(
-                f"grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' {log_file} | tail -1",
-                shell=True
-            ).decode().strip()
-
+            with open(url_file, "r") as f:
+                result = f.read().strip()
             if not result:
                 result = "현재 cloudflared 임시 URL을 찾을 수 없습니다."
-
         except Exception as e:
             result = f"URL 조회 실패: {e}"
 
