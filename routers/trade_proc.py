@@ -1345,7 +1345,7 @@ def holding_update(cust_nm: str, market_name: str, prd_nm: str, stop_price: Opti
     db = SessionLocal()
     try:
         # 고객명에 의한 고객정보 조회
-        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+        # cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
 
         # 보유종목 정보 변경 (미입력 가격 항목은 기존값 유지, 매매계획은 선택값으로 변경)
         UPDATE_BALANCE_INFO = """
@@ -1357,12 +1357,11 @@ def holding_update(cust_nm: str, market_name: str, prd_nm: str, stop_price: Opti
                 trading_plan = :trading_plan,
                 chgr_id = :chgr_id,
                 chg_date = :chg_date
-            WHERE cust_num = :cust_num
-            AND market_name = :market_name
+            WHERE market_name = :market_name
             AND prd_nm = :prd_nm
         """
         result = db.execute(text(UPDATE_BALANCE_INFO), {
-            "cust_num": cust_info[0],
+            # "cust_num": cust_info[0],
             "market_name": market_name,
             "prd_nm": prd_nm,
             "stop_price": stop_price,
