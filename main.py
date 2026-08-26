@@ -422,11 +422,11 @@ async def slack_interactivity(request: Request):
                 },
                 {
                     "type": "input",
-                    "block_id": "loss_price_input_block",
+                    "block_id": "stop_price_input_block",
                     "optional": True,
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "input_loss_price",
+                        "action_id": "input_stop_price",
                         "placeholder": {
                             "type": "plain_text",
                             "text": "이탈가를 입력해주세요 (선택)"
@@ -439,11 +439,11 @@ async def slack_interactivity(request: Request):
                 },
                 {
                     "type": "input",
-                    "block_id": "target_price_input_block",
+                    "block_id": "action_price_input_block",
                     "optional": True,
                     "element": {
                         "type": "plain_text_input",
-                        "action_id": "input_target_price",
+                        "action_id": "input_action_price",
                         "placeholder": {
                             "type": "plain_text",
                             "text": "목표가를 입력해주세요 (선택)"
@@ -525,8 +525,8 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
         state_values = payload["state"]["values"]
         prd_nm = None
-        loss_price = None
-        target_price = None
+        stop_price = None
+        action_price = None
         exit_price = None
         trading_plan = None
 
@@ -540,11 +540,11 @@ async def slack_interactivity(request: Request):
                         raise ValueError("상품명을 선택해주세요.")
                     prd_nm = selected_prd_nm["value"]
 
-                if "input_loss_price" in block:
-                    loss_price = parse_optional_price(block["input_loss_price"]["value"], "이탈가")
+                if "input_stop_price" in block:
+                    stop_price = parse_optional_price(block["input_stop_price"]["value"], "이탈가")
 
-                if "input_target_price" in block:
-                    target_price = parse_optional_price(block["input_target_price"]["value"], "목표가")
+                if "input_action_price" in block:
+                    action_price = parse_optional_price(block["input_action_price"]["value"], "목표가")
 
                 if "input_exit_price" in block:
                     exit_price = parse_optional_price(block["input_exit_price"]["value"], "최종이탈가")
@@ -562,8 +562,8 @@ async def slack_interactivity(request: Request):
                 cust_nm=cust_nm,
                 market_name=market_name,
                 prd_nm=prd_nm,
-                loss_price=loss_price,
-                target_price=target_price,
+                stop_price=stop_price,
+                action_price=action_price,
                 exit_price=exit_price,
                 trading_plan=trading_plan
             )

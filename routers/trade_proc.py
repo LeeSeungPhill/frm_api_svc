@@ -1341,7 +1341,7 @@ def get_holding_prd_list(cust_nm: str, market_name: str) -> List[str]:
     finally:
         db.close()
 
-def holding_update(cust_nm: str, market_name: str, prd_nm: str, loss_price: Optional[float] = None, target_price: Optional[float] = None, exit_price: Optional[float] = None, trading_plan: Optional[str] = None) -> str:
+def holding_update(cust_nm: str, market_name: str, prd_nm: str, stop_price: Optional[float] = None, action_price: Optional[float] = None, exit_price: Optional[float] = None, trading_plan: Optional[str] = None) -> str:
     db = SessionLocal()
     try:
         # 고객명에 의한 고객정보 조회
@@ -1351,8 +1351,8 @@ def holding_update(cust_nm: str, market_name: str, prd_nm: str, loss_price: Opti
         UPDATE_BALANCE_INFO = """
             UPDATE balance_info
             SET
-                loss_price = COALESCE(:loss_price, loss_price),
-                target_price = COALESCE(:target_price, target_price),
+                stop_price = COALESCE(:stop_price, stop_price),
+                action_price = COALESCE(:action_price, action_price),
                 exit_price = COALESCE(:exit_price, exit_price),
                 trading_plan = :trading_plan,
                 chgr_id = :chgr_id,
@@ -1365,8 +1365,8 @@ def holding_update(cust_nm: str, market_name: str, prd_nm: str, loss_price: Opti
             "cust_num": cust_info[0],
             "market_name": market_name,
             "prd_nm": prd_nm,
-            "loss_price": loss_price,
-            "target_price": target_price,
+            "stop_price": stop_price,
+            "action_price": action_price,
             "exit_price": exit_price,
             "trading_plan": trading_plan,
             "chgr_id": user_id,
@@ -1477,7 +1477,7 @@ def interest_update(cust_nm: str = None, market_name: str = None, prd_nm: str = 
                 VALUES (
                     :market_name, :prd_nm, :interest_day, :interest_dtm,
                     :through_price, :leave_price, :resist_price, :support_price,
-                    :trend_high_price, :trend_low_price, 'N', :last_chg_date)
+                    :trend_high_price, :trend_low_price, 'Y', :last_chg_date)
             """
             db.execute(text(INSERT_INTEREST), {
                 "market_name": market_name,
