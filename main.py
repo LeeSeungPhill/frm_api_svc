@@ -250,7 +250,12 @@ async def slack_interactivity(request: Request):
     payload = json.loads(form.get("payload"))
 
     action_id = payload["actions"][0]["action_id"]
+    action_type = payload["actions"][0].get("type")
     response_url = payload["response_url"]
+
+    # 콤보박스(select) 선택 자체는 값 저장용으로만 사용되며, 제출 버튼 클릭시에만 처리
+    if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select"):
+        return JSONResponse(content="")
 
     message = {}
 
