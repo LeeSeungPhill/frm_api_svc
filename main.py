@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, holding_update
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, holding_update
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -295,7 +295,7 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
         
         action_buttons = []
-        for text, action_id in [("잔고정보", "balance_action"), ("매매관리", "mng_action"), ("매매계획", "plan_action"), ("관심종목", "interest_action")]:
+        for text, action_id in [("보유종목", "balance_action"), ("관심종목", "interest_action"), ("매매관리", "mng_action"), ("매매계획", "plan_action")]:
             value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
             action_buttons.append({
                 "type": "button",
@@ -321,7 +321,7 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
 
         balance_buttons = []
-        for text, action_id in [("잔고 조회", "balance_list_action"), ("보유종목 수정", "holding_update_action")]:
+        for text, action_id in [("보유종목 조회", "balance_list_action"), ("보유종목 수정", "holding_update_action")]:
             value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
             balance_buttons.append({
                 "type": "button",
@@ -333,13 +333,13 @@ async def slack_interactivity(request: Request):
         message = {
             "response_type": "ephemeral",
             "replace_original": True,
-            "text": f"*[{market_name}] {cust_nm}*의 잔고정보 관리를 선택하세요.",
+            "text": f"*[{market_name}] {cust_nm}*의 보유종목 관리를 선택하세요.",
             "blocks": [
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "잔고정보 처리를 선택하세요"
+                        "text": "보유종목 처리를 선택하세요"
                     }
                 },
                 {
@@ -361,13 +361,13 @@ async def slack_interactivity(request: Request):
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] : 잔고정보*\n{balance_list}"
+                "text": f"*[{market_name}] [{cust_nm}] : 보유종목*\n{balance_list}"
             }
         except Exception as e:
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 잔고정보 조회 중 오류 발생* : {e}"
+                "text": f"*[{market_name}] [{cust_nm}] 보유종목 조회 중 오류 발생* : {e}"
             }
 
     elif action_id == "holding_update_action":
@@ -376,20 +376,39 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
         value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
 
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
+        # 보유종목 목록 조회
+        holding_prd_list = get_holding_prd_list(cust_nm=cust_nm, market_name=market_name)
+
+        if not holding_prd_list:
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"*[{market_name}] [{cust_nm}]* 보유중인 종목이 없습니다."
+            }
+        else:
+            prd_nm_options = [
+                {
+                    "text": { "type": "plain_text", "text": prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm },
+                    "value": prd_nm
+                }
+                for prd_nm in holding_prd_list
+            ]
+
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "blocks": [
                 {
                     "type": "input",
                     "block_id": "prd_nm_input_block",
                     "element": {
-                        "type": "plain_text_input",
+                        "type": "static_select",
                         "action_id": "input_prd_nm",
                         "placeholder": {
                             "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
+                            "text": "보유종목을 선택해주세요"
+                        },
+                        "options": prd_nm_options
                     },
                     "label": {
                         "type": "plain_text",
@@ -509,15 +528,12 @@ async def slack_interactivity(request: Request):
         try:
             for block_id, block in state_values.items():
                 if "input_prd_nm" in block:
-                    prd_nm = block["input_prd_nm"]["value"]
+                    selected_prd_nm = block["input_prd_nm"].get("selected_option")
 
                     # 유효성 검사
-                    if not prd_nm:
-                        raise ValueError("상품명을 입력해주세요.")
-                    # 영문 대문자만 허용 (소문자는 upper 처리)
-                    if not re.fullmatch(r'[A-Za-z]+', prd_nm):
-                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
-                    prd_nm = prd_nm.upper()
+                    if not selected_prd_nm:
+                        raise ValueError("상품명을 선택해주세요.")
+                    prd_nm = selected_prd_nm["value"]
 
                 if "input_loss_price" in block:
                     loss_price = parse_optional_price(block["input_loss_price"]["value"], "이탈가")
@@ -540,7 +556,7 @@ async def slack_interactivity(request: Request):
             result = holding_update(
                 cust_nm=cust_nm,
                 market_name=market_name,
-                prd_nm="KRW-" + prd_nm,
+                prd_nm=prd_nm,
                 loss_price=loss_price,
                 target_price=target_price,
                 exit_price=exit_price,
@@ -565,7 +581,7 @@ async def slack_interactivity(request: Request):
         cust_nm = selection["cust_nm"]
 
         interest_buttons = []
-        for text, action_id in [("관심종목 조회", "interest_list_action"), ("관심종목 수정", "interest_update_action")]:
+        for text, action_id in [("관심종목 조회", "interest_list_action"), ("관심종목 등록/수정", "interest_update_action")]:
             value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
             interest_buttons.append({
                 "type": "button",
@@ -749,7 +765,7 @@ async def slack_interactivity(request: Request):
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                "text": "관심종목 등록",
+                                "text": "관심종목 등록/수정",
                                 "emoji": True
                             },
                             "value": value,
