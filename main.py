@@ -261,6 +261,7 @@ def build_holding_update_blocks(
         {
             "type": "input",
             "block_id": f"prd_nm_input_block|{ctx_value}",
+            "dispatch_action": True,
             "element": prd_nm_element,
             "label": { "type": "plain_text", "text": "상품명" }
         },
