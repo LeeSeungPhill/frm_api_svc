@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, holding_update
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -180,6 +180,134 @@ def parse_optional_price(value: Optional[str], label: str) -> Optional[float]:
         raise ValueError(f"{label}는 0 이상의 숫자여야 합니다.")
     return price
 
+def format_price_input(value: Optional[float]) -> str:
+    """
+    입력항목의 초기값으로 표시하기 위해 소수점 5자리까지 표현하고 불필요한 0은 제거.
+    """
+    if value is None:
+        return ""
+    text_value = f"{float(value):.5f}".rstrip("0").rstrip(".")
+    return text_value if text_value else "0"
+
+def build_holding_update_blocks(
+    market_name: str,
+    cust_nm: str,
+    holding_prd_list: list,
+    selected_prd_nm: Optional[str] = None,
+    prices: Optional[dict] = None,
+    trading_plan_option: Optional[dict] = None
+) -> list:
+    """
+    보유종목 수정 화면 블록 생성. 상품명 선택시 기존 이탈가/수행가/최종이탈가를 초기값으로 표시.
+    """
+    ctx_value = encode_value({"market_name": market_name, "cust_nm": cust_nm})
+    value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
+    prices = prices or {}
+
+    def prd_nm_label(prd_nm: str) -> str:
+        return prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm
+
+    prd_nm_element = {
+        "type": "static_select",
+        "action_id": "input_prd_nm",
+        "placeholder": {
+            "type": "plain_text",
+            "text": "보유종목을 선택해주세요"
+        },
+        "options": [
+            {
+                "text": { "type": "plain_text", "text": prd_nm_label(prd_nm) },
+                "value": prd_nm
+            }
+            for prd_nm in holding_prd_list
+        ]
+    }
+    if selected_prd_nm:
+        prd_nm_element["initial_option"] = {
+            "text": { "type": "plain_text", "text": prd_nm_label(selected_prd_nm) },
+            "value": selected_prd_nm
+        }
+
+    def price_element(action_id: str, placeholder: str, price_key: str) -> dict:
+        element = {
+            "type": "plain_text_input",
+            "action_id": action_id,
+            "placeholder": {
+                "type": "plain_text",
+                "text": placeholder
+            }
+        }
+        if prices.get(price_key) is not None:
+            element["initial_value"] = format_price_input(prices.get(price_key))
+        return element
+
+    trading_plan_element = {
+        "type": "static_select",
+        "action_id": "input_trading_plan",
+        "placeholder": {
+            "type": "plain_text",
+            "text": "매매계획을 선택해주세요"
+        },
+        "options": [
+            { "text": { "type": "plain_text", "text": "홀딩" }, "value": "h" },
+            { "text": { "type": "plain_text", "text": "투자" }, "value": "i" },
+            { "text": { "type": "plain_text", "text": "일반" }, "value": "NULL" }
+        ]
+    }
+    if trading_plan_option:
+        trading_plan_element["initial_option"] = trading_plan_option
+
+    return [
+        {
+            "type": "input",
+            "block_id": f"prd_nm_input_block|{ctx_value}",
+            "element": prd_nm_element,
+            "label": { "type": "plain_text", "text": "상품명" }
+        },
+        {
+            "type": "input",
+            "block_id": "stop_price_input_block",
+            "optional": True,
+            "element": price_element("input_stop_price", "이탈가를 입력해주세요 (선택)", "stop_price"),
+            "label": { "type": "plain_text", "text": "이탈가" }
+        },
+        {
+            "type": "input",
+            "block_id": "action_price_input_block",
+            "optional": True,
+            "element": price_element("input_action_price", "수행가를 입력해주세요 (선택)", "action_price"),
+            "label": { "type": "plain_text", "text": "수행가" }
+        },
+        {
+            "type": "input",
+            "block_id": "exit_price_input_block",
+            "optional": True,
+            "element": price_element("input_exit_price", "최종이탈가를 입력해주세요 (선택)", "exit_price"),
+            "label": { "type": "plain_text", "text": "최종이탈가" }
+        },
+        {
+            "type": "input",
+            "block_id": "trading_plan_input_block",
+            "element": trading_plan_element,
+            "label": { "type": "plain_text", "text": "매매계획" }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "보유종목 수정",
+                        "emoji": True
+                    },
+                    "value": value,
+                    "action_id": "holding_update_proc"
+                }
+            ]
+        }
+    ]
+
 # Slash Command 처리
 @app.post("/slack/command")
 async def slack_command(request: Request):
@@ -254,7 +382,8 @@ async def slack_interactivity(request: Request):
     response_url = payload["response_url"]
 
     # 콤보박스(select) 선택 자체는 값 저장용으로만 사용되며, 제출 버튼 클릭시에만 처리
-    if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select"):
+    # (input_prd_nm 은 보유종목 수정 화면에서 선택시 기존 값을 표시하기 위해 예외적으로 처리)
+    if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select") and action_id != "input_prd_nm":
         return JSONResponse(content="")
 
     message = {}
@@ -379,7 +508,6 @@ async def slack_interactivity(request: Request):
         selection = json.loads(payload["actions"][0]["value"])
         market_name = selection["market_name"]
         cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
 
         # 보유종목 목록 조회
         holding_prd_list = get_holding_prd_list(cust_nm=cust_nm, market_name=market_name)
@@ -391,133 +519,47 @@ async def slack_interactivity(request: Request):
                 "text": f"*[{market_name}] [{cust_nm}]* 보유중인 종목이 없습니다."
             }
         else:
-            prd_nm_options = [
-                {
-                    "text": { "type": "plain_text", "text": prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm },
-                    "value": prd_nm
-                }
-                for prd_nm in holding_prd_list
-            ]
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "blocks": build_holding_update_blocks(market_name, cust_nm, holding_prd_list)
+            }
+
+    elif action_id == "input_prd_nm":
+        try:
+            block_id = payload["actions"][0]["block_id"]
+            _, encoded_ctx = block_id.split("|", 1)
+            ctx = decode_value(encoded_ctx)
+            market_name = ctx["market_name"]
+            cust_nm = ctx["cust_nm"]
+            selected_prd_nm = payload["actions"][0]["selected_option"]["value"]
+
+            # 선택한 보유종목의 기존 이탈가/수행가/최종이탈가 조회
+            holding_prd_list = get_holding_prd_list(cust_nm=cust_nm, market_name=market_name)
+            prices = get_holding_prices(cust_nm=cust_nm, market_name=market_name, prd_nm=selected_prd_nm)
+
+            # 기존 매매계획 선택값 유지
+            trading_plan_option = None
+            for block in payload.get("state", {}).get("values", {}).values():
+                if "input_trading_plan" in block and block["input_trading_plan"].get("selected_option"):
+                    trading_plan_option = block["input_trading_plan"]["selected_option"]
 
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "보유종목을 선택해주세요"
-                        },
-                        "options": prd_nm_options
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "stop_price_input_block",
-                    "optional": True,
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_stop_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "이탈가를 입력해주세요 (선택)"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "이탈가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "action_price_input_block",
-                    "optional": True,
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_action_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "목표가를 입력해주세요 (선택)"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "목표가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "exit_price_input_block",
-                    "optional": True,
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_exit_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "최종이탈가를 입력해주세요 (선택)"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "최종이탈가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "trading_plan_input_block",
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "input_trading_plan",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매매계획을 선택해주세요"
-                        },
-                        "options": [
-                            {
-                                "text": { "type": "plain_text", "text": "홀딩" },
-                                "value": "h"
-                            },
-                            {
-                                "text": { "type": "plain_text", "text": "투자" },
-                                "value": "i"
-                            },
-                            {
-                                "text": { "type": "plain_text", "text": "일반" },
-                                "value": "NULL"
-                            }
-                        ]
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매매계획"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "보유종목 수정",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "holding_update_proc"
-                        }
-                    ]
-                }
-            ]
-        }
+                "blocks": build_holding_update_blocks(
+                    market_name, cust_nm, holding_prd_list,
+                    selected_prd_nm=selected_prd_nm,
+                    prices=prices,
+                    trading_plan_option=trading_plan_option
+                )
+            }
+        except Exception as e:
+            message = {
+                "response_type": "ephemeral",
+                "replace_original": True,
+                "text": f"보유종목 정보 조회 중 오류 발생 : {e}"
+            }
 
     elif action_id == "holding_update_proc":
         selection = json.loads(payload["actions"][0]["value"])
@@ -544,7 +586,7 @@ async def slack_interactivity(request: Request):
                     stop_price = parse_optional_price(block["input_stop_price"]["value"], "이탈가")
 
                 if "input_action_price" in block:
-                    action_price = parse_optional_price(block["input_action_price"]["value"], "목표가")
+                    action_price = parse_optional_price(block["input_action_price"]["value"], "수행가")
 
                 if "input_exit_price" in block:
                     exit_price = parse_optional_price(block["input_exit_price"]["value"], "최종이탈가")

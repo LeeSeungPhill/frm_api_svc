@@ -33,9 +33,22 @@ def get_balance(cust_nm: str, market_name: str) -> str:
         req_data = BasicRequest(cust_nm=cust_nm, market_name=market_name)
         result = account_list(req_data, db)
 
+        # 고객명에 의한 고객정보 조회
+        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+
+        # 보유종목의 이탈가/수행가/최종이탈가 조회
+        SELECT_BALANCE_PRICE_INFO = """
+            SELECT prd_nm, stop_price, action_price, exit_price
+            FROM balance_info
+            WHERE cust_num = :cust_num
+            AND market_name = :market_name
+        """
+        price_info_rows = db.execute(text(SELECT_BALANCE_PRICE_INFO), {"cust_num": cust_info[0], "market_name": market_name}).mappings().all()
+        price_info_map = {row['prd_nm']: row for row in price_info_rows}
+
         text_lines = []
         for item in result["balance_list"]:
-            
+
             if item['name'] == "P":
                 text_lines.append(
                     f"*포인트*: {format_number(item['amt'])}"
@@ -43,13 +56,21 @@ def get_balance(cust_nm: str, market_name: str) -> str:
             elif item['name'] == "KRW":
                 text_lines.append(
                     f"*보유현금*: {format_number(item['amt'])}원"
-                )    
-            else:    
+                )
+            else:
+                price_info = price_info_map.get("KRW-" + item['name'])
+                stop_price = price_info['stop_price'] if price_info else None
+                action_price = price_info['action_price'] if price_info else None
+                exit_price = price_info['exit_price'] if price_info else None
+
                 text_lines.append(
                     f"*{item['name']}*: {format_number(item['price']) if float(item['price']) > 0 else ''}{' ['+format_number(item['trade_price'])+']' if float(item['trade_price']) > 0 else ''}\n"
                     f"> 보유량: {format_number(item['volume'])}{' ('+format_number(item['locked_volume'])+')' if float(item['locked_volume']) > 0  else ''}\n"
                     f"> 원금액: {format_number(item['amt'])}원, 평가액: {format_number(item['current_amt'])}원\n"
-                    f"> 손익금: {format_number(item['loss_profit_amt'])}원, 손익률: {item['loss_profit_rate']}%"
+                    f"> 손익금: {format_number(item['loss_profit_amt'])}원, 손익률: {item['loss_profit_rate']}%\n"
+                    f"> 이탈가: {format_number(stop_price) if stop_price is not None else '-'}, "
+                    f"수행가: {format_number(action_price) if action_price is not None else '-'}, "
+                    f"최종이탈가: {format_number(exit_price) if exit_price is not None else '-'}"
                 )
 
         return "\n".join(text_lines) if text_lines else "잔고가 없습니다."
@@ -1338,6 +1359,35 @@ def get_holding_prd_list(cust_nm: str, market_name: str) -> List[str]:
     except Exception as e:
         print(f"[get_holding_prd_list] 조회 실패: {e}")
         return []
+    finally:
+        db.close()
+
+def get_holding_prices(cust_nm: str, market_name: str, prd_nm: str) -> dict:
+    db = SessionLocal()
+    try:
+        # 고객명에 의한 고객정보 조회
+        cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+
+        SELECT_HOLDING_PRICES = """
+            SELECT stop_price, action_price, exit_price
+            FROM balance_info
+            WHERE cust_num = :cust_num
+            AND market_name = :market_name
+            AND prd_nm = :prd_nm
+        """
+        result = db.execute(text(SELECT_HOLDING_PRICES), {"cust_num": cust_info[0], "market_name": market_name, "prd_nm": prd_nm}).mappings().first()
+
+        if not result:
+            return {"stop_price": None, "action_price": None, "exit_price": None}
+
+        return {
+            "stop_price": float(result["stop_price"]) if result["stop_price"] is not None else None,
+            "action_price": float(result["action_price"]) if result["action_price"] is not None else None,
+            "exit_price": float(result["exit_price"]) if result["exit_price"] is not None else None,
+        }
+    except Exception as e:
+        print(f"[get_holding_prices] 조회 실패: {e}")
+        return {"stop_price": None, "action_price": None, "exit_price": None}
     finally:
         db.close()
 
