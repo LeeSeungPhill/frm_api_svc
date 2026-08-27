@@ -203,6 +203,7 @@ def build_holding_update_blocks(
     ctx_value = encode_value({"market_name": market_name, "cust_nm": cust_nm})
     value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
     prices = prices or {}
+    price_block_suffix = f"|{selected_prd_nm}" if selected_prd_nm else ""
 
     def prd_nm_label(prd_nm: str) -> str:
         return prd_nm.split('-')[-1] if '-' in prd_nm else prd_nm
@@ -267,21 +268,21 @@ def build_holding_update_blocks(
         },
         {
             "type": "input",
-            "block_id": "stop_price_input_block",
+            "block_id": f"stop_price_input_block{price_block_suffix}",
             "optional": True,
             "element": price_element("input_stop_price", "이탈가를 입력해주세요 (선택)", "stop_price"),
             "label": { "type": "plain_text", "text": "이탈가" }
         },
         {
             "type": "input",
-            "block_id": "action_price_input_block",
+            "block_id": f"action_price_input_block{price_block_suffix}",
             "optional": True,
             "element": price_element("input_action_price", "수행가를 입력해주세요 (선택)", "action_price"),
             "label": { "type": "plain_text", "text": "수행가" }
         },
         {
             "type": "input",
-            "block_id": "exit_price_input_block",
+            "block_id": f"exit_price_input_block{price_block_suffix}",
             "optional": True,
             "element": price_element("input_exit_price", "최종이탈가를 입력해주세요 (선택)", "exit_price"),
             "label": { "type": "plain_text", "text": "최종이탈가" }
