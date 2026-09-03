@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import asyncio
 import json
 import requests
 from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update
@@ -313,6 +314,10 @@ def build_holding_update_blocks(
 # Slash Command 처리
 @app.post("/slack/command")
 async def slack_command(request: Request):
+    # Slack 재시도(retry) 요청은 중복 처리 방지를 위해 무시
+    if request.headers.get("X-Slack-Retry-Num"):
+        return JSONResponse(content="")
+
     form = await request.form()
     command = form.get("command")
     text = form.get("text")
@@ -376,9 +381,19 @@ async def slack_command(request: Request):
 # 버튼 클릭 이벤트 처리
 @app.post("/slack/interactivity")
 async def slack_interactivity(request: Request):
+    # Slack 재시도(retry) 요청은 중복 처리(중복 주문 등) 방지를 위해 무시
+    if request.headers.get("X-Slack-Retry-Num"):
+        return JSONResponse(content="")
+
     form = await request.form()
     payload = json.loads(form.get("payload"))
 
+    # Slack에는 즉시 ACK 응답하고, 실제 처리는 백그라운드에서 진행 (3초 제한으로 인한 타임아웃/재시도 방지)
+    asyncio.create_task(process_slack_interactivity(payload))
+
+    return JSONResponse(content="")
+
+async def process_slack_interactivity(payload: dict):
     action_id = payload["actions"][0]["action_id"]
     action_type = payload["actions"][0].get("type")
     response_url = payload["response_url"]
@@ -386,7 +401,7 @@ async def slack_interactivity(request: Request):
     # 콤보박스(select) 선택 자체는 값 저장용으로만 사용되며, 제출 버튼 클릭시에만 처리
     # (input_prd_nm 은 보유종목 수정 화면에서 선택시 기존 값을 표시하기 위해 예외적으로 처리)
     if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select") and action_id != "input_prd_nm":
-        return JSONResponse(content="")
+        return
 
     message = {}
 
@@ -2460,11 +2475,9 @@ async def slack_interactivity(request: Request):
     try:
         response = requests.post(response_url, json=message)
         response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        print("Slack 응답 실패:", e.response.status_code, "-", e.response.text)
-        print("전송된 message:", json.dumps(message, ensure_ascii=False, indent=2))    
-
-    return JSONResponse(content="") 
+    except requests.exceptions.RequestException as e:
+        print("Slack 응답 실패:", e)
+        print("전송된 message:", json.dumps(message, ensure_ascii=False, indent=2))
 
 @click.group()
 def cli():

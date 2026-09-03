@@ -839,16 +839,15 @@ def get_order_open(cust_nm: str, market_name: str) -> str:
         text_lines = []
 
         if market_name == 'UPBIT':
-            
-            # 업비트에서 거래 가능한 종목 목록
-            url = "https://api.upbit.com/v1/market/all?is_details=false"
-            headers = {"accept": "application/json"}
-            market_list = requests.get(url, headers=headers).json()
-            
-            for item in market_list:
+
+            # 체결 대기 주문 조회 (마켓별 순회 없이 전체 마켓 대상 1회 조회, 100건 초과시 페이지네이션)
+            raw_order_list = []
+            page = 1
+            while True:
                 params = {
-                    'market': item['market'],
-                    'states[]': ['wait', 'watch']
+                    'states[]': ['wait', 'watch'],
+                    'page': page,
+                    'limit': 100,
                 }
                 query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
 
@@ -869,132 +868,140 @@ def get_order_open(cust_nm: str, market_name: str) -> str:
                     'Authorization': authorization,
                 }
 
-                # 체결 대기 주문 조회
-                raw_order_list = requests.get(upbit_api_url + "/v1/orders/open", params=params, headers=headers).json()             
+                page_order_list = requests.get(upbit_api_url + "/v1/orders/open", params=params, headers=headers).json()
 
-                for ord_info in raw_order_list:
-                    
-                    # 매매관리정보 존재여부 조회
-                    SELECT_TRADE_MNG = """
-                        SELECT 
-                            ord_no
-                        FROM trade_mng 
-                        WHERE market_name = 'UPBIT'
-                        AND cust_num = :cust_num
-                        AND prd_nm = :prd_nm
-                        AND (ord_no = :ord_no OR orgn_ord_no = :ord_no)
+                if not isinstance(page_order_list, list) or len(page_order_list) < 1:
+                    break
 
-                        UNION ALL
+                raw_order_list.extend(page_order_list)
 
-                        SELECT 
-                            ord_no
-                        FROM trade_mng_hist
-                        WHERE market_name = 'UPBIT'
-                        AND cust_num = :cust_num
-                        AND prd_nm = :prd_nm
-                        AND (ord_no = :ord_no OR orgn_ord_no = :ord_no)
+                if len(page_order_list) < 100:
+                    break
+                page += 1
+
+            for ord_info in raw_order_list:
+
+                # 매매관리정보 존재여부 조회
+                SELECT_TRADE_MNG = """
+                    SELECT
+                        ord_no
+                    FROM trade_mng
+                    WHERE market_name = 'UPBIT'
+                    AND cust_num = :cust_num
+                    AND prd_nm = :prd_nm
+                    AND (ord_no = :ord_no OR orgn_ord_no = :ord_no)
+
+                    UNION ALL
+
+                    SELECT
+                        ord_no
+                    FROM trade_mng_hist
+                    WHERE market_name = 'UPBIT'
+                    AND cust_num = :cust_num
+                    AND prd_nm = :prd_nm
+                    AND (ord_no = :ord_no OR orgn_ord_no = :ord_no)
+                """
+                chk_trade_mng_list = db.execute(text(SELECT_TRADE_MNG), {"cust_num": cust_info[0], "prd_nm": ord_info['market'], "ord_no": ord_info['uuid'],}).mappings().all()
+
+                if len(chk_trade_mng_list) < 1:
+                    # 매매관리정보 미존재 대상 생성 처리
+                    INSERT_TRADE_INFO = """
+                        INSERT INTO trade_mng (
+                            cust_num,
+                            market_name,
+                            ord_dtm,
+                            ord_no,
+                            prd_nm,
+                            ord_tp,
+                            ord_state,
+                            ord_count,
+                            ord_expect_totamt,
+                            ord_price,
+                            ord_vol,
+                            ord_amt,
+                            cut_price,
+                            cut_rate,
+                            cut_amt,
+                            goal_price,
+                            goal_rate,
+                            goal_amt,
+                            margin_vol,
+                            executed_vol,
+                            remaining_vol,
+                            paid_fee,
+                            ord_type,
+                            regr_id,
+                            reg_date,
+                            chgr_id,
+                            chg_date)
+                        VALUES (
+                            :cust_num,
+                            :market_name,
+                            :ord_dtm,
+                            :ord_no,
+                            :prd_nm,
+                            :ord_tp,
+                            :ord_state,
+                            :ord_count,
+                            :ord_expect_totamt,
+                            :ord_price,
+                            :ord_vol,
+                            :ord_amt,
+                            :cut_price,
+                            :cut_rate,
+                            :cut_amt,
+                            :goal_price,
+                            :goal_rate,
+                            :goal_amt,
+                            :margin_vol,
+                            :executed_vol,
+                            :remaining_vol,
+                            :paid_fee,
+                            :ord_type,
+                            :regr_id,
+                            :reg_date,
+                            :chgr_id,
+                            :chg_date)
                     """
-                    chk_trade_mng_list = db.execute(text(SELECT_TRADE_MNG), {"cust_num": cust_info[0], "prd_nm": item['market'], "ord_no": ord_info['uuid'],}).mappings().all()
-                    
-                    if len(chk_trade_mng_list) < 1:                  
-                        # 매매관리정보 미존재 대상 생성 처리                    
-                        INSERT_TRADE_INFO = """
-                            INSERT INTO trade_mng (
-                                cust_num, 
-                                market_name, 
-                                ord_dtm, 
-                                ord_no, 
-                                prd_nm, 
-                                ord_tp,
-                                ord_state,
-                                ord_count,
-                                ord_expect_totamt,
-                                ord_price,
-                                ord_vol,
-                                ord_amt,
-                                cut_price,
-                                cut_rate,
-                                cut_amt,
-                                goal_price,
-                                goal_rate,
-                                goal_amt,
-                                margin_vol,
-                                executed_vol,
-                                remaining_vol,
-                                paid_fee,
-                                ord_type,
-                                regr_id, 
-                                reg_date, 
-                                chgr_id, 
-                                chg_date)
-                            VALUES (
-                                :cust_num, 
-                                :market_name, 
-                                :ord_dtm,
-                                :ord_no,
-                                :prd_nm,
-                                :ord_tp,
-                                :ord_state,
-                                :ord_count,
-                                :ord_expect_totamt,
-                                :ord_price,
-                                :ord_vol,
-                                :ord_amt,
-                                :cut_price,
-                                :cut_rate,
-                                :cut_amt,
-                                :goal_price,
-                                :goal_rate,
-                                :goal_amt,
-                                :margin_vol,
-                                :executed_vol,
-                                :remaining_vol,
-                                :paid_fee,
-                                :ord_type,
-                                :regr_id,
-                                :reg_date,
-                                :chgr_id,
-                                :chg_date)
-                        """
-                        db.execute(text(INSERT_TRADE_INFO), {
-                            "cust_num": cust_info[0], 
-                            "market_name": market_name, 
-                            "ord_dtm": datetime.fromisoformat(ord_info['created_at']).strftime("%Y%m%d%H%M%S"), 
-                            "ord_no": ord_info['uuid'], 
-                            "prd_nm": item['market'],
-                            "ord_tp": "01" if ord_info['side'] == 'bid' else "02",
-                            "ord_state": ord_info['state'],
-                            "ord_count": 0,
-                            "ord_expect_totamt": 0,
-                            "ord_price": Decimal(ord_info['price']),
-                            "ord_vol": Decimal(ord_info['remaining_volume']),
-                            "ord_amt": int(Decimal(ord_info['price']) * Decimal(ord_info['remaining_volume'])),
-                            "cut_price": 0,
-                            "cut_rate": 0,
-                            "cut_amt": 0,
-                            "goal_price": 0,
-                            "goal_rate": 0,
-                            "goal_amt": 0,
-                            "margin_vol": 0,
-                            "executed_vol": Decimal(ord_info['executed_volume']),
-                            "remaining_vol": Decimal(ord_info['remaining_volume']),
-                            "paid_fee": Decimal(ord_info['paid_fee']),
-                            "ord_type":ord_info['ord_type'],
-                            "regr_id": user_id,
-                            "reg_date": datetime.now(),
-                            "chgr_id": user_id,
-                            "chg_date": datetime.now()
-                            })
-                        db.commit()
-                    
-                    summary = (
-                        f"*{item['market'].split('-')[-1]}*: {'매수' if ord_info['side'] == 'bid' else '매도'} 주문 {ord_info['state']} 상태\n"
-                        f"> 주문단가: {format_number(ord_info['price'])}\n"
-                        f"> 주문시간: {datetime.fromisoformat(ord_info['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"> 주문량: {format_number(ord_info['volume'])}, 채결량: {format_number(ord_info['executed_volume'])}, 잔량: {format_number(ord_info['remaining_volume'])}"
-                    )
-                    text_lines.append((summary, ord_info['uuid']))
-            
+                    db.execute(text(INSERT_TRADE_INFO), {
+                        "cust_num": cust_info[0],
+                        "market_name": market_name,
+                        "ord_dtm": datetime.fromisoformat(ord_info['created_at']).strftime("%Y%m%d%H%M%S"),
+                        "ord_no": ord_info['uuid'],
+                        "prd_nm": ord_info['market'],
+                        "ord_tp": "01" if ord_info['side'] == 'bid' else "02",
+                        "ord_state": ord_info['state'],
+                        "ord_count": 0,
+                        "ord_expect_totamt": 0,
+                        "ord_price": Decimal(ord_info['price']),
+                        "ord_vol": Decimal(ord_info['remaining_volume']),
+                        "ord_amt": int(Decimal(ord_info['price']) * Decimal(ord_info['remaining_volume'])),
+                        "cut_price": 0,
+                        "cut_rate": 0,
+                        "cut_amt": 0,
+                        "goal_price": 0,
+                        "goal_rate": 0,
+                        "goal_amt": 0,
+                        "margin_vol": 0,
+                        "executed_vol": Decimal(ord_info['executed_volume']),
+                        "remaining_vol": Decimal(ord_info['remaining_volume']),
+                        "paid_fee": Decimal(ord_info['paid_fee']),
+                        "ord_type":ord_info['ord_type'],
+                        "regr_id": user_id,
+                        "reg_date": datetime.now(),
+                        "chgr_id": user_id,
+                        "chg_date": datetime.now()
+                        })
+                    db.commit()
+
+                summary = (
+                    f"*{ord_info['market'].split('-')[-1]}*: {'매수' if ord_info['side'] == 'bid' else '매도'} 주문 {ord_info['state']} 상태\n"
+                    f"> 주문단가: {format_number(ord_info['price'])}\n"
+                    f"> 주문시간: {datetime.fromisoformat(ord_info['created_at']).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"> 주문량: {format_number(ord_info['volume'])}, 채결량: {format_number(ord_info['executed_volume'])}, 잔량: {format_number(ord_info['remaining_volume'])}"
+                )
+                text_lines.append((summary, ord_info['uuid']))
+
         elif market_name == 'BITHUMB':
             
             # 대기 상태 주문관리정보 조회
