@@ -8,6 +8,7 @@ from typing import List, Tuple, Union, Optional
 import re
 import base64
 from datetime import datetime, timedelta
+from urllib.parse import quote
 # from routers import auth as auth_router
 from routers import cust_mng as cust_mng_router
 from routers import trade_mng as trade_mng_router
@@ -311,6 +312,25 @@ def build_holding_update_blocks(
         }
     ]
 
+def get_tunnel_url(nickname: Optional[str] = None) -> str:
+    """
+    cloudflared 임시 접속 URL을 조회하고, 닉네임이 주어지면 쿼리 파라미터로 덧붙인다.
+    """
+    url_file = "/home/terra/log/tunnel/universe_tunnel_url.txt"
+    try:
+        with open(url_file, "r") as f:
+            result = f.read().strip()
+        if not result:
+            return "현재 cloudflared 임시 URL을 찾을 수 없습니다."
+    except Exception as e:
+        return f"URL 조회 실패: {e}"
+
+    if nickname:
+        separator = "&" if "?" in result else "?"
+        result = f"{result}{separator}nickname={quote(nickname)}"
+
+    return result
+
 # Slash Command 처리
 @app.post("/slack/command")
 async def slack_command(request: Request):
@@ -324,14 +344,8 @@ async def slack_command(request: Request):
     user_id = form.get("user_id")
 
     if command == "/info":
-        url_file = "/home/terra/log/tunnel/universe_tunnel_url.txt"
-        try:
-            with open(url_file, "r") as f:
-                result = f.read().strip()
-            if not result:
-                result = "현재 cloudflared 임시 URL을 찾을 수 없습니다."
-        except Exception as e:
-            result = f"URL 조회 실패: {e}"
+        nickname = text.strip() if text else None
+        result = get_tunnel_url(nickname)
 
         return JSONResponse({
             "response_type": "in_channel",
