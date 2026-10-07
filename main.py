@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import asyncio
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update, get_cust_list, get_ticker, calc_buy_plan, get_sell_holding_list
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -309,8 +309,321 @@ def build_holding_update_blocks(
                     "action_id": "holding_update_proc"
                 }
             ]
-        }
+        },
+        back_actions("cust", m=market_name, f="holding_update")
     ]
+
+# ────────────────────────────────────────────────────────────────────────────
+# 메뉴 구조 : 거래소 선택 → (보유종목 | 매매관리) → 기능 선택 → 고객 선택 → 기능 화면
+# 화면 이동 버튼은 action_id 가 "go_" 로 시작하고, value(JSON)의 "to" 에 이동할 화면을 담는다.
+# ────────────────────────────────────────────────────────────────────────────
+FEATURE_LABELS = {
+    "holding_list": "보유종목 조회",
+    "holding_update": "보유종목 수정",
+    "buy": "매수",
+    "sell": "매도",
+    "order_open": "대기주문내역",
+    "order_update": "주문정정",
+    "order_cancel": "주문취소",
+}
+HOLDING_FEATURES = ["holding_list", "holding_update"]
+TRADE_FEATURES = ["buy", "sell", "order_open", "order_update", "order_cancel"]
+UPBIT_ONLY_FEATURES = ["order_update"]
+MAX_LIST_ITEMS = 40
+
+def section(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+def actions(elements: list) -> dict:
+    return {"type": "actions", "elements": elements}
+
+def button(text: str, action_id: str, value: dict, style: Optional[str] = None, confirm: Optional[str] = None) -> dict:
+    element = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": text, "emoji": True},
+        "action_id": action_id,
+        "value": json.dumps(value, ensure_ascii=False),
+    }
+    if style:
+        element["style"] = style
+    if confirm:
+        element["confirm"] = {
+            "title": {"type": "plain_text", "text": f"{text} 확인"},
+            "text": {"type": "mrkdwn", "text": confirm},
+            "confirm": {"type": "plain_text", "text": "실행"},
+            "deny": {"type": "plain_text", "text": "취소"},
+        }
+    return element
+
+def back_actions(to: str, **ctx) -> dict:
+    return actions([button("⬅ 이전", "go_back", {"to": to, **ctx})])
+
+def home_actions() -> dict:
+    return actions([button("처음으로", "go_home", {"to": "market"})])
+
+def text_input(block_id: str, action_id: str, label: str, placeholder: str, initial: Optional[str] = None) -> dict:
+    element = {
+        "type": "plain_text_input",
+        "action_id": action_id,
+        "placeholder": {"type": "plain_text", "text": placeholder},
+    }
+    if initial not in (None, ""):
+        element["initial_value"] = str(initial)
+    return {"type": "input", "block_id": block_id, "element": element, "label": {"type": "plain_text", "text": label}}
+
+def text_sections(text: str, chunk_size: int = 2900) -> list:
+    # section 블록 text 는 최대 3000자이므로 줄 단위로 나누어 여러 블록으로 표시
+    blocks, chunk = [], ""
+    for line in (text or "").split("\n"):
+        if chunk and len(chunk) + len(line) + 1 > chunk_size:
+            blocks.append(section(chunk))
+            chunk = ""
+        chunk = f"{chunk}\n{line}" if chunk else line
+    if chunk.strip():
+        blocks.append(section(chunk))
+    return blocks
+
+def fmt_num(value) -> str:
+    # 정수는 천단위 콤마, 소수는 소수점 8자리까지 표시 (불필요한 0 제거)
+    number = float(value)
+    if number == int(number):
+        return f"{int(number):,}"
+    return f"{number:,.8f}".rstrip("0").rstrip(".")
+
+def get_state_value(payload: dict, action_id: str) -> Optional[str]:
+    for block in payload.get("state", {}).get("values", {}).values():
+        if action_id in block:
+            return block[action_id].get("value")
+    return None
+
+def parse_number(value: Optional[str], label: str, allow_zero: bool = True) -> float:
+    if value is None or not value.strip():
+        raise ValueError(f"{label}을(를) 입력해주세요.")
+    value = value.strip().replace(",", "")
+    if not re.fullmatch(r"\d+(\.\d{1,8})?", value):
+        raise ValueError(f"{label}은(는) 0 이상의 숫자이며 소숫점 8자리까지만 입력 가능합니다.")
+    number = float(value)
+    if not allow_zero and number <= 0:
+        raise ValueError(f"{label}은(는) 0보다 커야 합니다.")
+    return number
+
+def normalize_result_lines(result) -> list:
+    # trade_proc 처리 결과(튜플/딕셔너리 리스트)를 (표시문구, 주문번호) 리스트로 변환
+    lines = []
+    for line in result or []:
+        if isinstance(line, dict):
+            line_text, order_no = line.get("text", ""), line.get("order_no", "")
+        elif isinstance(line, tuple) and len(line) == 2:
+            line_text, order_no = line
+        else:
+            continue
+        if line_text and line_text.strip():
+            lines.append((line_text.strip(), order_no or ""))
+    return lines
+
+def build_result_blocks(title: str, result) -> list:
+    # 처리 결과 화면 : 결과 표시 후 "처음으로" 버튼
+    blocks = [section(f"*{title}*")]
+    if isinstance(result, str) or result is None:
+        blocks += text_sections(result or "처리 결과가 없습니다.")
+    else:
+        lines = normalize_result_lines(result)
+        if not lines:
+            blocks.append(section("처리 결과가 없습니다."))
+        for line_text, order_no in lines[:MAX_LIST_ITEMS]:
+            block = section(line_text)
+            if order_no:
+                block["accessory"] = {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "주문번호 표시"},
+                    "value": order_no,
+                    "action_id": "copy_uuid_action",
+                }
+            blocks.append(block)
+        if len(lines) > MAX_LIST_ITEMS:
+            blocks.append(section(f"외 {len(lines) - MAX_LIST_ITEMS}건"))
+    blocks.append(home_actions())
+    return blocks
+
+def build_error_blocks(title: str, error) -> list:
+    return [section(f"*{title} 중 오류 발생* : {error}"), home_actions()]
+
+def build_market_blocks(user_id: str) -> list:
+    return [
+        section(f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"),
+        actions([
+            button("UPBIT", "go_market_upbit", {"to": "main", "m": "UPBIT"}),
+            button("BITHUMB", "go_market_bithumb", {"to": "main", "m": "BITHUMB"}),
+        ]),
+    ]
+
+def build_main_menu_blocks(m: str) -> list:
+    return [
+        section(f"*[{m}]* 메뉴를 선택하세요"),
+        actions([
+            button("보유종목", "go_holding_menu", {"to": "holding_menu", "m": m}),
+            button("매매관리", "go_trade_menu", {"to": "trade_menu", "m": m}),
+        ]),
+        back_actions("market"),
+    ]
+
+def build_feature_menu_blocks(m: str, title: str, features: list) -> list:
+    features = [f for f in features if m == "UPBIT" or f not in UPBIT_ONLY_FEATURES]
+    return [
+        section(f"*[{m}] {title}* 처리를 선택하세요"),
+        actions([button(FEATURE_LABELS[f], f"go_feature_{f}", {"to": "cust", "m": m, "f": f}) for f in features]),
+        back_actions("main", m=m),
+    ]
+
+def build_cust_blocks(m: str, f: str) -> list:
+    cust_list = get_cust_list(m)
+    blocks = [section(f"*[{m}] {FEATURE_LABELS[f]}* 고객을 선택하세요")]
+    if cust_list:
+        blocks.append(actions([button(c, f"go_cust_{i}", {"to": f, "m": m, "c": c}) for i, c in enumerate(cust_list)]))
+    else:
+        blocks.append(section("등록된 고객이 없습니다."))
+    blocks.append(back_actions("holding_menu" if f in HOLDING_FEATURES else "trade_menu", m=m))
+    return blocks
+
+def build_holding_update_entry_blocks(m: str, c: str) -> list:
+    holding_prd_list = get_holding_prd_list(cust_nm=c, market_name=m)
+    if not holding_prd_list:
+        return [section(f"*[{m}] [{c}]* 보유중인 종목이 없습니다."), back_actions("cust", m=m, f="holding_update")]
+    return build_holding_update_blocks(m, c, holding_prd_list)
+
+def build_buy_form_blocks(m: str, c: str, prefill: Optional[dict] = None) -> list:
+    p = prefill or {}
+    return [
+        section(f"*[{m}] [{c}] 매수*\n매수가 0 입력시 현재가, 이탈가 0 입력시 금일 저가를 적용합니다."),
+        text_input("buy_prd_nm_block", "buy_prd_nm", "상품명", "상품명을 입력해주세요 (예: BTC)", p.get("prd_nm")),
+        text_input("buy_price_block", "buy_price", "매수가 (현재가: 0)", "매수가를 입력해주세요", p.get("buy_price")),
+        text_input("buy_loss_price_block", "buy_loss_price", "이탈가 (저가: 0)", "이탈가를 입력해주세요", p.get("loss_price")),
+        text_input("buy_amt_block", "buy_amt", "매수금액", "매수금액을 입력해주세요", p.get("buy_amt")),
+        text_input("buy_loss_amt_block", "buy_loss_amt", "손절금액", "손절금액을 입력해주세요", p.get("loss_amt")),
+        actions([button("계산", "buy_calc", {"m": m, "c": c}, style="primary")]),
+        back_actions("cust", m=m, f="buy"),
+    ]
+
+def build_buy_preview_blocks(m: str, c: str, inputs: dict, buy_price: float, loss_price: float, plan: dict,
+                             is_current_price: bool = False, is_low_price: bool = False) -> list:
+    prd_nm = inputs["prd_nm"]
+    buy_price_label = f"{fmt_num(buy_price)}원" + (" (현재가)" if is_current_price else "")
+    loss_price_label = f"{fmt_num(loss_price)}원" + (" (저가)" if is_low_price else "")
+
+    def plan_text(title: str, item: dict) -> str:
+        return f"*{title}*\n매수금액: {fmt_num(item['buy_amt'])}원 | 매수량: {fmt_num(item['qty'])} | 손실금액: {fmt_num(item['loss_amt'])}원"
+
+    order_buttons = []
+    for label, action_id, key in [("손절금액", "buy_exec_loss", "loss_based"), ("매수금액", "buy_exec_amt", "amt_based")]:
+        item = plan[key]
+        if float(item["qty"]) > 0:
+            order_buttons.append(button(
+                label, action_id,
+                {"m": m, "c": c, "prd_nm": prd_nm, "price": buy_price, "qty": item["qty"]},
+                style="primary",
+                confirm=f"[{m}] [{c}] *{prd_nm}* {fmt_num(buy_price)}원, {fmt_num(item['qty'])} 매수주문을 실행합니다.",
+            ))
+    order_buttons.append(button("다시계산", "go_recalc", {"to": "buy", "m": m, "c": c, "p": inputs}))
+
+    return [
+        section(f"*[{m}] [{c}] 매수주문 미리보기*\n*{prd_nm}* | 매수가: {buy_price_label} | 이탈가: {loss_price_label} | 손절율: {plan['loss_rate']}%"),
+        {"type": "divider"},
+        section(plan_text("손절금액 기준", plan["loss_based"])),
+        {"type": "divider"},
+        section(plan_text("매수금액 기준", plan["amt_based"])),
+        actions(order_buttons),
+        back_actions("cust", m=m, f="buy"),
+    ]
+
+def build_sell_list_blocks(m: str, c: str) -> list:
+    holdings = get_sell_holding_list(cust_nm=c, market_name=m)
+    blocks = [section(f"*[{m}] [{c}] 매도* 매도할 보유종목을 선택하세요")]
+    if not holdings:
+        blocks.append(section("보유중인 종목이 없습니다."))
+    for i, h in enumerate(holdings[:MAX_LIST_ITEMS]):
+        block = section(f"*{h['prd_nm']}*\n보유수량: {fmt_num(h['volume'])} | 손수익율: {h['loss_profit_rate']}% | 현재금액: {fmt_num(h['current_amt'])}원")
+        block["accessory"] = button("선택", f"go_sell_item_{i}", {"to": "sell_form", "m": m, "c": c, "h": h})
+        blocks.append(block)
+    blocks.append(back_actions("cust", m=m, f="sell"))
+    return blocks
+
+def build_sell_form_blocks(m: str, c: str, h: dict) -> list:
+    return [
+        section(f"*[{m}] [{c}] 매도 - {h['prd_nm']}*\n보유수량: {fmt_num(h['volume'])} | 손수익율: {h['loss_profit_rate']}% | 현재금액: {fmt_num(h['current_amt'])}원"),
+        text_input("sell_price_block", "sell_price", "매도가 (현재가: 0)", "매도가를 입력해주세요"),
+        text_input("sell_rate_block", "sell_rate", "매도비율 (1~100%)", "매도비율을 입력해주세요"),
+        actions([button(
+            "매도", "sell_exec", {"m": m, "c": c, "h": h}, style="danger",
+            confirm=f"[{m}] [{c}] *{h['prd_nm']}* 매도주문을 실행합니다.",
+        )]),
+        back_actions("sell", m=m, c=c),
+    ]
+
+def build_order_open_blocks(m: str, c: str) -> list:
+    return build_result_blocks(f"[{m}] [{c}] 대기주문내역", get_order_open(cust_nm=c, market_name=m))
+
+def build_order_list_blocks(m: str, c: str, f: str) -> list:
+    result = get_order_open(cust_nm=c, market_name=m)
+    if isinstance(result, str):
+        return build_error_blocks(f"[{m}] [{c}] 대기주문 조회", result)
+
+    blocks = [section(f"*[{m}] [{c}] {FEATURE_LABELS[f]}* 대상 주문을 선택하세요")]
+    orders = [(t, o) for t, o in normalize_result_lines(result) if o]
+    if not orders:
+        blocks.append(section("대기중인 주문이 없습니다."))
+    for i, (order_text, order_no) in enumerate(orders[:MAX_LIST_ITEMS]):
+        block = section(order_text)
+        block["accessory"] = button("선택", f"go_order_item_{i}", {"to": "order_form", "m": m, "c": c, "f": f, "o": order_no, "s": order_text})
+        blocks.append(block)
+    blocks.append(back_actions("cust", m=m, f=f))
+    return blocks
+
+def build_order_form_blocks(m: str, c: str, f: str, order_no: str, order_text: str) -> list:
+    blocks = [section(f"*[{m}] [{c}] {FEATURE_LABELS[f]}*\n{order_text}\n> 주문번호: {order_no}")]
+    if f == "order_update":
+        blocks.append(text_input("order_price_block", "order_price", "주문가 (시장가: 0)", "정정할 주문가를 입력해주세요"))
+        blocks.append(actions([button(
+            "주문정정", "order_update_exec", {"m": m, "c": c, "o": order_no, "s": order_text}, style="primary",
+            confirm=f"[{m}] [{c}] 주문({order_no})을 정정합니다.",
+        )]))
+    else:
+        blocks.append(actions([button(
+            "주문취소", "order_cancel_exec", {"m": m, "c": c, "o": order_no}, style="danger",
+            confirm=f"[{m}] [{c}] 주문({order_no})을 취소합니다.",
+        )]))
+    blocks.append(back_actions(f, m=m, c=c))
+    return blocks
+
+def render_screen(nav: dict, user_id: str) -> list:
+    to, m, c = nav.get("to"), nav.get("m"), nav.get("c")
+
+    if to == "market":
+        return build_market_blocks(user_id)
+    if to == "main":
+        return build_main_menu_blocks(m)
+    if to == "holding_menu":
+        return build_feature_menu_blocks(m, "보유종목", HOLDING_FEATURES)
+    if to == "trade_menu":
+        return build_feature_menu_blocks(m, "매매관리", TRADE_FEATURES)
+    if to == "cust":
+        return build_cust_blocks(m, nav["f"])
+    if to == "holding_list":
+        return build_result_blocks(f"[{m}] [{c}] 보유종목", get_balance(cust_nm=c, market_name=m))
+    if to == "holding_update":
+        return build_holding_update_entry_blocks(m, c)
+    if to == "buy":
+        return build_buy_form_blocks(m, c, nav.get("p"))
+    if to == "sell":
+        return build_sell_list_blocks(m, c)
+    if to == "sell_form":
+        return build_sell_form_blocks(m, c, nav["h"])
+    if to == "order_open":
+        return build_order_open_blocks(m, c)
+    if to in ("order_update", "order_cancel"):
+        return build_order_list_blocks(m, c, to)
+    if to == "order_form":
+        return build_order_form_blocks(m, c, nav["f"], nav["o"], nav["s"])
+    raise ValueError(f"알 수 없는 화면입니다: {to}")
 
 def get_tunnel_url(nickname: Optional[str] = None) -> str:
     """
@@ -357,38 +670,7 @@ async def slack_command(request: Request):
         return JSONResponse(
             content={
                 "response_type": "ephemeral",
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"
-                        }
-                    },
-                    {
-                        "type": "actions",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "UPBIT",
-                                },
-                                "value": "UPBIT",
-                                "action_id": "select_upbit"
-                            },
-                            {
-                                "type": "button",
-                                "text": {
-                                    "type": "plain_text",
-                                    "text": "BITHUMB",
-                                },
-                                "value": "BITHUMB",
-                                "action_id": "select_bithumb"
-                            }
-                        ]
-                    }
-                ]
+                "blocks": build_market_blocks(user_id)
             }
         )
 
@@ -419,142 +701,167 @@ async def process_slack_interactivity(payload: dict):
 
     message = {}
 
-    if action_id in ["select_upbit", "select_bithumb"]:
-        market_name = payload["actions"][0]["value"]
-        
-        customer_buttons = []
-        for cust_nm in ["phills2", "mama", "honey"]:
-            customer_buttons.append({
-                "type": "button",
-                "text": {
-                    "type": "plain_text",
-                    "text": cust_nm,
-                    "emoji": True
-                },
-                "value": json.dumps({"market_name": market_name, "cust_nm": cust_nm}),
-                "action_id": "select_customer_"+cust_nm
-            })
+    user_id = payload.get("user", {}).get("id", "")
+
+    if action_id.startswith("go_"):
+        nav = json.loads(payload["actions"][0]["value"])
+        try:
+            blocks = render_screen(nav, user_id)
+        except Exception as e:
+            blocks = build_error_blocks("화면 조회", e)
 
         message = {
             "response_type": "ephemeral",
             "replace_original": True,
-            "text": "고객 선택",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "어느 고객을 선택하시겠습니까?"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": customer_buttons
-                }
-            ]
+            "text": "메뉴",
+            "blocks": blocks
         }
 
-    elif action_id  in ["select_customer_phills2", "select_customer_mama", "select_customer_honey"]:
+    elif action_id == "buy_calc":
         selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        
-        action_buttons = []
-        for text, action_id in [("보유종목", "balance_action"), ("관심종목", "interest_action"), ("매매관리", "mng_action"), ("매매계획", "plan_action")]:
-            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-            action_buttons.append({
-                "type": "button",
-                "text": { "type": "plain_text", "text": text },
-                "value": value,
-                "action_id": action_id
-            })
-
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "actions",
-                    "elements": action_buttons
-                }
-            ]
+        market_name, cust_nm = selection["m"], selection["c"]
+        inputs = {
+            "prd_nm": (get_state_value(payload, "buy_prd_nm") or "").strip().upper(),
+            "buy_price": get_state_value(payload, "buy_price"),
+            "loss_price": get_state_value(payload, "buy_loss_price"),
+            "buy_amt": get_state_value(payload, "buy_amt"),
+            "loss_amt": get_state_value(payload, "buy_loss_amt"),
         }
-    
-    elif action_id == "balance_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-
-        balance_buttons = []
-        for text, action_id in [("보유종목 조회", "balance_list_action"), ("보유종목 수정", "holding_update_action")]:
-            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-            balance_buttons.append({
-                "type": "button",
-                "text": { "type": "plain_text", "text": text },
-                "value": value,
-                "action_id": action_id
-            })
-
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "text": f"*[{market_name}] {cust_nm}*의 보유종목 관리를 선택하세요.",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "보유종목 처리를 선택하세요"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": balance_buttons
-                }
-            ]
-        }
-
-    elif action_id == "balance_list_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
 
         try:
-            # 잔고 조회
-            balance_list = get_balance(cust_nm=cust_nm, market_name=market_name)
+            if not re.fullmatch(r"[A-Z0-9]+", inputs["prd_nm"]):
+                raise ValueError("상품명은 영문/숫자만 입력 가능합니다.")
+            buy_price_in = parse_number(inputs["buy_price"], "매수가")
+            loss_price_in = parse_number(inputs["loss_price"], "이탈가")
+            buy_amt = parse_number(inputs["buy_amt"], "매수금액", allow_zero=False)
+            loss_amt = parse_number(inputs["loss_amt"], "손절금액", allow_zero=False)
 
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] : 보유종목*\n{balance_list}"
-            }
+            # 매수가 0 : 현재가, 이탈가 0 : 금일 저가
+            ticker = get_ticker(market_name, inputs["prd_nm"])
+            buy_price = ticker["trade_price"] if buy_price_in == 0 else buy_price_in
+            loss_price = ticker["low_price"] if loss_price_in == 0 else loss_price_in
+            if buy_price <= loss_price:
+                raise ValueError(f"매수가({fmt_num(buy_price)})가 이탈가({fmt_num(loss_price)}) 이하입니다.")
+
+            plan = calc_buy_plan(buy_price, loss_price, buy_amt, loss_amt)
+            blocks = build_buy_preview_blocks(
+                market_name, cust_nm, inputs, buy_price, loss_price, plan,
+                is_current_price=buy_price_in == 0,
+                is_low_price=loss_price_in == 0
+            )
         except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 보유종목 조회 중 오류 발생* : {e}"
-            }
+            blocks = [section(f"*[{market_name}] [{cust_nm}] 매수 계산 중 오류 발생* : {e}")] + build_buy_form_blocks(market_name, cust_nm, inputs)
 
-    elif action_id == "holding_update_action":
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": "매수주문 미리보기",
+            "blocks": blocks
+        }
+
+    elif action_id in ("buy_exec_loss", "buy_exec_amt"):
         selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 매수주문"
 
-        # 보유종목 목록 조회
-        holding_prd_list = get_holding_prd_list(cust_nm=cust_nm, market_name=market_name)
+        try:
+            # 미리보기에서 산정한 매수가/매수량으로 지정가 매수
+            order_info = buy_proc(
+                cust_nm=cust_nm,
+                market_name=market_name,
+                gubun="custom",
+                prd_nm=selection["prd_nm"],
+                price=selection["price"],
+                custom_volumn=selection["qty"]
+            )
+            blocks = build_result_blocks(title, order_info)
+        except Exception as e:
+            blocks = build_error_blocks(title, e)
 
-        if not holding_prd_list:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}]* 보유중인 종목이 없습니다."
-            }
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": title,
+            "blocks": blocks
+        }
+
+    elif action_id == "sell_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm, holding = selection["m"], selection["c"], selection["h"]
+        prd_nm = holding["prd_nm"]
+        title = f"[{market_name}] [{cust_nm}] 매도주문"
+
+        try:
+            price_in = parse_number(get_state_value(payload, "sell_price"), "매도가")
+            sell_rate = parse_number(get_state_value(payload, "sell_rate"), "매도비율", allow_zero=False)
+            if not 1 <= sell_rate <= 100:
+                raise ValueError("매도비율은 1~100 사이로 입력해주세요.")
+
+            # 매도가 0 : 현재가
+            price = get_ticker(market_name, prd_nm)["trade_price"] if price_in == 0 else price_in
+        except Exception as e:
+            blocks = [section(f"*{title} 입력 오류* : {e}")] + build_sell_form_blocks(market_name, cust_nm, holding)
         else:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "blocks": build_holding_update_blocks(market_name, cust_nm, holding_prd_list)
-            }
+            try:
+                order_info = sell_proc(
+                    cust_nm=cust_nm,
+                    market_name=market_name,
+                    gubun="rate",
+                    prd_nm=prd_nm,
+                    price=price,
+                    custom_volumn_rate=sell_rate
+                )
+                blocks = build_result_blocks(title, order_info)
+            except Exception as e:
+                blocks = build_error_blocks(title, e)
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": title,
+            "blocks": blocks
+        }
+
+    elif action_id == "order_update_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 주문정정"
+
+        try:
+            price = parse_number(get_state_value(payload, "order_price"), "주문가")
+        except Exception as e:
+            blocks = [section(f"*{title} 입력 오류* : {e}")] + build_order_form_blocks(market_name, cust_nm, "order_update", selection["o"], selection["s"])
+        else:
+            try:
+                result = order_update(cust_nm=cust_nm, market_name=market_name, order_no=selection["o"], price=price)
+                blocks = build_result_blocks(title, result)
+            except Exception as e:
+                blocks = build_error_blocks(title, e)
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": title,
+            "blocks": blocks
+        }
+
+    elif action_id == "order_cancel_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 주문취소"
+
+        try:
+            result = order_cancel(cust_nm=cust_nm, market_name=market_name, order_no=selection["o"])
+            blocks = build_result_blocks(title, result)
+        except Exception as e:
+            blocks = build_error_blocks(title, e)
+
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": title,
+            "blocks": blocks
+        }
 
     elif action_id == "input_prd_nm":
         try:
@@ -644,13 +951,15 @@ async def process_slack_interactivity(payload: dict):
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 보유종목 수정*\n{result}"
+                "text": f"[{market_name}] [{cust_nm}] 보유종목 수정",
+                "blocks": build_result_blocks(f"[{market_name}] [{cust_nm}] 보유종목 수정", result)
             }
         except Exception as e:
             message = {
                 "response_type": "ephemeral",
                 "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 보유종목 수정 중 오류 발생* : {e}"
+                "text": f"[{market_name}] [{cust_nm}] 보유종목 수정",
+                "blocks": build_error_blocks(f"[{market_name}] [{cust_nm}] 보유종목 수정", e)
             }
 
     elif action_id == "interest_action":
@@ -922,1344 +1231,6 @@ async def process_slack_interactivity(payload: dict):
                 "text": f"*[{market_name}] 관심종목 등록/수정 중 오류 발생* : {e}"
             }
 
-    elif action_id == "mng_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        
-        mng_buttons = []
-        
-        if market_name == "UPBIT":
-            for text, action_id in [("매수", "buy_action"), ("매도", "sell_action"), ("대기주문내역", "order_open_action"), ("주문정정", "order_update_action"), ("주문취소", "order_cancel_action"), ("종료주문내역", "order_close_action")]:
-                value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-                mng_buttons.append({
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": text },
-                    "value": value,
-                    "action_id": action_id
-                })
-        else:
-            for text, action_id in [("매수", "buy_action"), ("매도", "sell_action"), ("대기주문내역", "order_open_action"), ("주문취소", "order_cancel_action"), ("종료주문내역", "order_close_action")]:
-                value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-                mng_buttons.append({
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": text },
-                    "value": value,
-                    "action_id": action_id
-                })
-
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "text": f"*[{market_name}] {cust_nm}*의 매매관리를 선택하세요.",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "매매 처리를 선택하세요"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": mng_buttons
-                }
-            ]
-        }
-
-    elif action_id == "buy_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-        
-        buy_buttons = []
-        for text, action_id in [("손절금액 매수", "cut_buy_action"), ("매수금액 매수", "amt_buy_action"), ("현재가 매수", "direct_buy_action"), ("매수량 매수가", "custom_buy_action")]:
-            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-            buy_buttons.append({
-                "type": "button",
-                "text": { "type": "plain_text", "text": text },
-                "value": value,
-                "action_id": action_id
-            })
-
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "text": f"*[{market_name}] {cust_nm}*의 매수 방식을 선택하세요.",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "매수 방식을 선택하세요"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": buy_buttons
-                }
-            ]
-        }
-    
-    elif action_id == "cut_buy_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "cut"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "cut_price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_cut_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "이탈가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "이탈가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "cut_amt_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_cut_amt",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "손절금액을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "손절금액"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "손절금액 매수",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "buy_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-        
-    elif action_id == "amt_buy_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "amt"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "buy_amt_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_buy_amt",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수금액을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수금액"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "매수금액 매수",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "buy_proc"
-                        }
-                    ]
-                }
-            ]
-        }    
-    
-    elif action_id == "direct_buy_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "direct"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "buy_amt_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_buy_amt",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수금액을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수금액"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "현재가 매수",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "buy_proc"
-                        }
-                    ]
-                }
-            ]
-        }   
-        
-    elif action_id == "custom_buy_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "custom"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "volumn_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_volumn",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매수량를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매수량"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "매수량 매수가 매수",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "buy_proc"
-                        }
-                    ]
-                }
-            ]
-        }   
-    
-    elif action_id == "buy_proc":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        gubun = selection.get("gubun")
-        state_values = payload["state"]["values"]
-        prd_nm = None
-        price = None
-        cut_price = None
-        custom_volumn = None
-        buy_amt = None
-        cut_amt = None
-
-        try:
-            for block_id, block in state_values.items():
-                if "input_prd_nm" in block:
-                    prd_nm = block["input_prd_nm"]["value"]
-                    
-                    # 유효성 검사
-                    if not prd_nm:
-                        raise ValueError("상품명을 입력해주세요.")
-                    # 영문 대문자만 허용 (소문자는 upper 처리)
-                    if not re.fullmatch(r'[A-Za-z]+', prd_nm):
-                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
-                    prd_nm = prd_nm.upper()
-                    
-                if "input_price" in block:
-                    price_input = block["input_price"]["value"]
-                    
-                    # 유효성 검사
-                    if not price_input:
-                        raise ValueError("매수가를 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", price_input):
-                        raise ValueError("매수가는 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    price = float(price_input)
-
-                    # 0 이상의 값인지 확인
-                    if price < 0:
-                        raise ValueError("매수가는 0 이상의 숫자여야 합니다.")
-                    
-                if "input_cut_price" in block:
-                    cut_price_input = block["input_cut_price"]["value"]
-                    
-                    # 유효성 검사
-                    if not cut_price_input:
-                        raise ValueError("이탈가를 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", cut_price_input):
-                        raise ValueError("이탈가는 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    cut_price = float(cut_price_input)
-
-                    # 0 이상의 값인지 확인
-                    if cut_price < 0:
-                        raise ValueError("이탈가는 0 이상의 숫자여야 합니다.")    
-                
-                if "input_volumn" in block:
-                    volumn_input = block["input_volumn"]["value"]
-                    
-                    # 유효성 검사
-                    if not volumn_input:
-                        raise ValueError("매수량을 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", volumn_input):
-                        raise ValueError("매수량은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    custom_volumn = float(volumn_input)
-
-                    # 0 이상의 값인지 확인
-                    if custom_volumn < 0:
-                        raise ValueError("매수량은 0 이상의 숫자여야 합니다.")    
-                    
-                if "input_buy_amt" in block:
-                    buy_amt_input = block["input_buy_amt"]["value"]
-                    
-                    # 유효성 검사
-                    if not buy_amt_input:
-                        raise ValueError("매수금액을 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", buy_amt_input):
-                        raise ValueError("매수금액은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    buy_amt = float(buy_amt_input)
-
-                    # 0 이상의 값인지 확인
-                    if buy_amt < 0:
-                        raise ValueError("매수금액은 0 이상의 숫자여야 합니다.")    
-                    
-                if "input_cut_amt" in block:
-                    cut_amt_input = block["input_cut_amt"]["value"]
-                    
-                    # 유효성 검사
-                    if not cut_amt_input:
-                        raise ValueError("손절금액을 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", cut_amt_input):
-                        raise ValueError("손절금액은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    cut_amt = float(cut_amt_input)
-
-                    # 0 이상의 값인지 확인
-                    if cut_amt < 0:
-                        raise ValueError("손절금액은 0 이상의 숫자여야 합니다.")       
-
-            # 매수 처리
-            order_info = buy_proc(cust_nm=cust_nm, market_name=market_name, gubun=gubun, prd_nm=prd_nm, price=price, cut_price=cut_price, custom_volumn=custom_volumn, buy_amt=buy_amt, cut_amt=cut_amt)
-            blocks = build_blocks(order_info, market_name, cust_nm)
-            
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 매수 처리*",
-                "blocks": blocks
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 매수 처리 중 오류 발생* : {e}"
-            } 
-    
-    elif action_id == "sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-        
-        sell_buttons = []
-        for text, action_id in [("전체 매도", "all_sell_action"), ("66% 매도", "66_sell_action"), ("절반 매도", "half_sell_action"), ("33% 매도", "33_sell_action"), ("25% 매도", "25_sell_action"), ("20% 매도", "20_sell_action"), ("현재가 매도", "direct_sell_action"), ("매도량 매도가", "custom_sell_action")]:
-            value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-            sell_buttons.append({
-                "type": "button",
-                "text": { "type": "plain_text", "text": text },
-                "value": value,
-                "action_id": action_id
-            })
-
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "text": f"*[{market_name}] {cust_nm}*의 매도 방식을 선택하세요.",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "매도 방식을 선택하세요"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": sell_buttons
-                }
-            ]
-        }
-    
-    elif action_id == "all_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "all"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "전체 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-    
-    elif action_id == "66_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "66"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "66% 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        } 
-    
-    elif action_id == "half_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "half"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "절반 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }    
-    
-    elif action_id == "33_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "33"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "33% 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-        
-    elif action_id == "25_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "25"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "25% 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-        
-    elif action_id == "20_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "20"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "20% 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }           
-    
-    elif action_id == "direct_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "direct"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "volumn_rate_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_volumn_rate",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도비율(%)을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도비율(%)"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "현재가 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }   
-        
-    elif action_id == "custom_sell_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm, "gubun": "custom"})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도가를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도가"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "volumn_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_volumn",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매도량를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매도량"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "매도량 매도가 매도",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "sell_proc"
-                        }
-                    ]
-                }
-            ]
-        }           
-    
-    elif action_id == "sell_proc":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        gubun = selection.get("gubun")
-        state_values = payload["state"]["values"]
-        prd_nm = None
-        price = None
-        custom_volumn_rate = None
-        custom_volumn = None
-
-        try:
-            for block_id, block in state_values.items():
-                if "input_prd_nm" in block:
-                    prd_nm = block["input_prd_nm"]["value"]
-                    
-                    # 유효성 검사
-                    if not prd_nm:
-                        raise ValueError("상품명을 입력해주세요.")
-                    # 영문 대문자만 허용 (소문자는 upper 처리)
-                    if not re.fullmatch(r'[A-Za-z]+', prd_nm):
-                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
-                    prd_nm = prd_nm.upper()
-                    
-                if "input_price" in block:
-                    price_input = block["input_price"]["value"]
-                    
-                    # 유효성 검사
-                    if not price_input:
-                        raise ValueError("매도가를 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", price_input):
-                        raise ValueError("매도가는 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    price = float(price_input)
-
-                    # 0 이상의 값인지 확인
-                    if price < 0:
-                        raise ValueError("매도가는 0 이상의 숫자여야 합니다.")
-                
-                if "input_volumn_rate" in block:
-                    volumn_input_rate = block["input_volumn_rate"]["value"]
-                    
-                    # 유효성 검사
-                    if not volumn_input_rate:
-                        raise ValueError("매도비율(%)을 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", volumn_input_rate):
-                        raise ValueError("매도비율(%)은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    custom_volumn_rate = float(volumn_input_rate)
-
-                    # 0 이상의 값인지 확인
-                    if custom_volumn_rate < 0:
-                        raise ValueError("매도비율(%)은 0 이상의 숫자여야 합니다.")
-                
-                if "input_volumn" in block:
-                    volumn_input = block["input_volumn"]["value"]
-                    
-                    # 유효성 검사
-                    if not volumn_input:
-                        raise ValueError("매도량을 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", volumn_input):
-                        raise ValueError("매도량은 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    custom_volumn = float(volumn_input)
-
-                    # 0 이상의 값인지 확인
-                    if custom_volumn < 0:
-                        raise ValueError("매도량은 0 이상의 숫자여야 합니다.")    
-
-            # 매도 처리
-            order_info = sell_proc(cust_nm=cust_nm, market_name=market_name, gubun=gubun, prd_nm=prd_nm, price=price, custom_volumn_rate=custom_volumn_rate, custom_volumn=custom_volumn)
-            blocks = build_blocks(order_info, market_name, cust_nm)
-            
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 매도 처리*",
-                "blocks": blocks
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 매도 처리 중 오류 발생* : {e}"
-            }  
-    
-    elif action_id == "order_open_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        
-        try:
-            # 대기주문내역 조회
-            order_list = get_order_open(cust_nm=cust_nm, market_name=market_name)
-            blocks = build_blocks(order_list, market_name, cust_nm)
-            
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 대기주문내역*",
-                "blocks": blocks
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 대기주문내역 조회 중 오류 발생* : {e}"
-            }
-        
-    elif action_id == "order_update_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "ord_no_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_ord_no",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "주문번호를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "주문번호"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "price_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_price",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "매매가(시장가:0)를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "매매가"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "주문 정정",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "order_update_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-    
-    elif action_id == "order_update_proc":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        state_values = payload["state"]["values"]
-        order_no = None
-        price = None
-
-        try:
-            for block_id, block in state_values.items():
-                if "input_ord_no" in block:
-                    order_no = block["input_ord_no"]["value"]
-                    
-                    # 유효성 검사
-                    if not order_no:
-                        raise ValueError("주문번호를 입력해주세요.")
-                    
-                if "input_price" in block:
-                    price_input = block["input_price"]["value"]
-                    
-                    # 유효성 검사
-                    if not price_input:
-                        raise ValueError("매매가를 입력해주세요.")
-                    # 숫자인지 확인 (정수 또는 소수, 음수 불가)
-                    if not re.fullmatch(r"\d+(\.\d{1,5})?", price_input):
-                        raise ValueError("매매가는 0 이상의 숫자이며 소숫점 5자리까지만 입력 가능합니다.")
-
-                    # 문자열을 float으로 변환
-                    price = float(price_input)
-
-                    # 0 이상의 값인지 확인
-                    if price < 0:
-                        raise ValueError("매매가는 0 이상의 숫자여야 합니다.")
-            
-            # 주문 취소 후 재주문
-            order_update_info = order_update(cust_nm=cust_nm, market_name=market_name, order_no=order_no, price=price)
-            blocks = build_blocks(order_update_info, market_name, cust_nm)
-            
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 주문 취소 후 재주문*",
-                "blocks": blocks
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 주문 취소 후 재주문 중 오류 발생* : {e}"
-            }
-    
-    elif action_id == "order_cancel_action":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        value = json.dumps({"market_name": market_name, "cust_nm": cust_nm})
-        
-        message = {
-            "response_type": "ephemeral",
-            "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "ord_no_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_ord_no",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "주문번호를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "주문번호"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "주문 취소",
-                                "emoji": True
-                            },
-                            "value": value,
-                            "action_id": "order_cancel_proc"
-                        }
-                    ]
-                }
-            ]
-        }
-        
-    elif action_id == "order_cancel_proc":
-        selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        order_no = payload["state"]["values"]["ord_no_input_block"]["input_ord_no"]["value"]
-            
-        try:
-            if not order_no:
-                raise ValueError("주문번호를 입력해주세요.")
-            
-            # 주문 취소 접수
-            order_cancel_info = order_cancel(cust_nm=cust_nm, market_name=market_name, order_no=order_no)
-            
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 주문 취소 접수*\n{order_cancel_info}"
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 주문 취소 접수 중 오류 발생* : {e}"
-            }
-            
     elif action_id == "order_close_action":
         selection = json.loads(payload["actions"][0]["value"])
         market_name = selection["market_name"]

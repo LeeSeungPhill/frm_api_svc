@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 import os
 from sqlalchemy import text
-from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, InvalidOperation, localcontext
 from typing import Optional
 from typing import List, Tuple, Optional
 from sqlalchemy.sql import text
@@ -26,6 +26,68 @@ def format_number(value):
         return f"{float(value):,.2f}" if isinstance(value, float) else f"{int(value):,}"
     except:
         return str(value)
+
+def to_plain_str(value) -> str:
+    # str(float)는 소량(예: 8.8e-05)을 지수표기로 만들어 거래소 API가 거부하므로 고정소수점 문자열로 변환
+    return format(Decimal(str(value)), 'f')
+
+def get_cust_list(market_name: str) -> List[str]:
+    db = SessionLocal()
+    try:
+        SELECT_CUST_LIST = """
+            SELECT cust_nm
+            FROM cust_mng
+            WHERE market_name = :market_name
+            ORDER BY cust_num
+        """
+        return [row[0] for row in db.execute(text(SELECT_CUST_LIST), {"market_name": market_name}).fetchall()]
+    finally:
+        db.close()
+
+def get_ticker(market_name: str, prd_nm: str) -> dict:
+    api_url = upbit_api_url if market_name == 'UPBIT' else bithumb_api_url
+    res = requests.get(api_url + "/v1/ticker", params={"markets": "KRW-" + prd_nm}, timeout=10).json()
+    if not isinstance(res, list) or len(res) < 1:
+        raise ValueError(f"{prd_nm} 시세 정보를 조회할 수 없습니다.")
+    return {"trade_price": float(res[0]['trade_price']), "low_price": float(res[0]['low_price'])}
+
+def calc_buy_plan(buy_price: float, loss_price: float, buy_amt: float, loss_amt: float) -> dict:
+    # 손절금액 기준 / 매수금액 기준 매수량 산정 (Batch/reservebot.py 매수주문 미리보기와 동일 공식, 수량은 소수점 8자리 절사)
+    # sell_proc 등이 스레드 전역 Decimal 정밀도를 바꾸므로 로컬 컨텍스트에서 계산
+    with localcontext() as ctx:
+        ctx.prec = 28
+        qty_unit = Decimal("0.00000001")
+        bp = Decimal(str(buy_price))
+        lp = Decimal(str(loss_price))
+        unit_loss = bp - lp
+
+        loss_qty = (Decimal(str(loss_amt)) / unit_loss).quantize(qty_unit, rounding=ROUND_DOWN)
+        amt_qty = (Decimal(str(buy_amt)) / bp).quantize(qty_unit, rounding=ROUND_DOWN)
+
+        return {
+            "loss_rate": round(float((Decimal(100) - lp / bp * Decimal(100)) * -1), 2),
+            "loss_based": {"qty": format(loss_qty, 'f'), "buy_amt": int(bp * loss_qty), "loss_amt": int(unit_loss * loss_qty)},
+            "amt_based": {"qty": format(amt_qty, 'f'), "buy_amt": int(bp * amt_qty), "loss_amt": int(unit_loss * amt_qty)},
+        }
+
+def get_sell_holding_list(cust_nm: str, market_name: str) -> list:
+    db = SessionLocal()
+    try:
+        req_data = BasicRequest(cust_nm=cust_nm, market_name=market_name)
+        result = account_list(req_data, db)
+
+        return [
+            {
+                "prd_nm": item['name'],
+                "volume": float(item['volume']),
+                "loss_profit_rate": float(item['loss_profit_rate']),
+                "current_amt": int(item['current_amt']),
+            }
+            for item in result["balance_list"]
+            if item['name'] not in ("KRW", "P") and float(item['volume']) > 0
+        ]
+    finally:
+        db.close()
 
 def get_balance(cust_nm: str, market_name: str) -> str:
     db = SessionLocal()
@@ -203,7 +265,7 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     secret_key,
                     market="KRW-"+prd_nm,
                     side="bid",                     # 매수
-                    volume=str(volume),             # 매수량
+                    volume=to_plain_str(volume),             # 매수량
                     price=str(ord_amt) if ord_type == "price" else str(price),               # 시장가 : 매수금액, 지정가 : 매수가격
                     ord_type=ord_type               # 주문유형
                 )
@@ -374,7 +436,7 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
                     secret_key,
                     market="KRW-"+prd_nm,
                     side="bid",                     # 매수
-                    volume=str(volume),             # 매수량
+                    volume=to_plain_str(volume),             # 매수량
                     price=str(ord_amt) if ord_type == "price" else str(price),               # 시장가 : 매수금액, 지정가 : 매수가격
                     ord_type=ord_type               # 주문유형
                 )
@@ -544,7 +606,14 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
                     volume = float((available_volume * ratio).quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP))    
                 elif gubun == "direct":
                     ratio = Decimal(custom_volumn_rate) / Decimal("100")
-                    volume = float((available_volume * ratio).quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP)) 
+                    volume = float((available_volume * ratio).quantize(Decimal("0.00001"), rounding=ROUND_HALF_UP))
+                elif gubun == "rate":
+                    # 매도비율(1~100) 지정가 매도 : 위 prec=10 설정의 영향을 받지 않도록 로컬 컨텍스트에서 계산
+                    with localcontext() as ctx:
+                        ctx.prec = 28
+                        rate_available = Decimal(str(item['volume'])) - Decimal(str(item['locked_volume']))
+                        rate_volume = rate_available * Decimal(str(custom_volumn_rate)) / Decimal("100")
+                        volume = float(rate_volume.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN))
                 elif gubun == "custom":  
                     # 사용자 매도량과 매도 가능 수량 비교
                     if float(custom_volumn) <= (float(item['volume']) - float(item['locked_volume'])): 
@@ -565,7 +634,7 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
                         secret_key,
                         market="KRW-"+prd_nm,
                         side="ask",                     # 매도
-                        volume=str(volume),             # 매도량
+                        volume=to_plain_str(volume),             # 매도량
                         price=str(price),               # 매도가격
                         ord_type=ord_type               # 주문유형
                     )
@@ -691,7 +760,7 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
                         secret_key,
                         market="KRW-"+prd_nm,
                         side="ask",                     # 매도
-                        volume=str(volume),             # 매도량
+                        volume=to_plain_str(volume),             # 매도량
                         price=str(price),               # 매도가격
                         ord_type=ord_type               # 주문유형
                     )
