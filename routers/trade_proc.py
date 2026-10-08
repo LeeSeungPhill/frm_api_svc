@@ -566,11 +566,76 @@ def buy_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Opt
     finally:
         db.close()
 
+def exchange_auth_headers(market_name: str, access_key: str, secret_key: str, params: Optional[dict] = None) -> dict:
+    payload = {
+        'access_key': access_key,
+        'nonce': str(uuid.uuid4()),
+    }
+    if market_name == 'BITHUMB':
+        payload['timestamp'] = round(time.time() * 1000)
+    if params:
+        query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
+        payload['query_hash'] = hashlib.sha512(query_string).hexdigest()
+        payload['query_hash_alg'] = 'SHA512'
+
+    return {'Authorization': 'Bearer {}'.format(jwt.encode(payload, secret_key))}
+
+def get_open_sell_orders(market_name: str, access_key: str, secret_key: str, prd_nm: str) -> list:
+    # 체결대기 주문 조회 (BITHUMB 은 states[] 미지원으로 state=wait 단건 조회)
+    if market_name == 'UPBIT':
+        api_url, path, params = upbit_api_url, "/v1/orders/open", {'market': "KRW-" + prd_nm, 'states[]': ['wait', 'watch']}
+    else:
+        api_url, path, params = bithumb_api_url, "/v1/orders", {'market': "KRW-" + prd_nm, 'state': 'wait'}
+
+    orders = requests.get(api_url + path, params=params, headers=exchange_auth_headers(market_name, access_key, secret_key, params), timeout=10).json()
+    if not isinstance(orders, list):
+        raise RuntimeError(f"체결대기 주문 조회 실패: {orders}")
+
+    return [order for order in orders if order.get('side') == 'ask']
+
+def cancel_open_sell_orders(db, market_name: str, access_key: str, secret_key: str, prd_nm: str) -> Tuple[list, list, bool]:
+    # 체결대기 매도주문 취소 → (결과문구, 취소된 주문번호, 성공여부)
+    api_url = upbit_api_url if market_name == 'UPBIT' else bithumb_api_url
+    lines, cancelled = [], []
+
+    try:
+        open_orders = get_open_sell_orders(market_name, access_key, secret_key, prd_nm)
+    except Exception as e:
+        lines.append({"text": f"*{prd_nm} : 체결대기 매도주문 조회 실패로 매도를 진행하지 않습니다.* => {e}", "order_no": ""})
+        return lines, cancelled, False
+
+    for order in open_orders:
+        params = {'uuid': order['uuid']}
+        try:
+            res = requests.delete(api_url + "/v1/order", params=params, headers=exchange_auth_headers(market_name, access_key, secret_key, params), timeout=10).json()
+        except Exception as e:
+            res = {'error': {'message': str(e)}}
+
+        if isinstance(res, dict) and 'error' in res:
+            lines.append({"text": f"*{prd_nm} : 체결대기 매도주문 취소 실패로 매도를 진행하지 않습니다.* => {res['error'].get('message')}", "order_no": order['uuid']})
+            return lines, cancelled, False
+
+        cancelled.append(order['uuid'])
+        lines.append({"text": f"*{prd_nm}*: 체결대기 매도주문 취소\n> 주문단가: {format_number(float(order.get('price') or 0))}, 잔량: {order.get('remaining_volume')}", "order_no": order['uuid']})
+
+        # 매매관리정보 주문상태 변경
+        UPDATE_TRADE_STATE = """
+            UPDATE trade_mng
+            SET ord_state = 'cancel', chgr_id = :chgr_id, chg_date = :chg_date
+            WHERE market_name = :market_name
+            AND ord_no = :ord_no
+            AND ord_state IN ('wait', 'watch')
+        """
+        db.execute(text(UPDATE_TRADE_STATE), {"market_name": market_name, "ord_no": order['uuid'], "chgr_id": user_id, "chg_date": datetime.now()})
+        db.commit()
+
+    return lines, cancelled, True
+
 def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Optional[float] = None, custom_volumn_rate: Optional[float] = None, custom_volumn: Optional[float] = None,) -> str:
     db = SessionLocal()
     try:
         text_lines = []
-              
+
         # 고객명에 의한 고객정보 조회
         cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
 
@@ -579,8 +644,19 @@ def sell_proc(cust_nm: str, market_name: str, gubun: str, prd_nm: str, price: Op
         # secret_key
         secret_key = cust_info[5]
 
-        # 잔고조회
+        # 체결대기 매도주문 취소 후 매도 진행 (주문에 묶인 수량을 매도가능 수량으로 전환)
+        cancel_lines, cancelled_orders, cancel_ok = cancel_open_sell_orders(db, market_name, access_key, secret_key, prd_nm)
+        text_lines.extend(cancel_lines)
+        if not cancel_ok:
+            return text_lines
+
+        # 잔고조회 (취소된 주문이 있으면 묶인 수량이 해제될 때까지 최대 약 3초 대기)
         raw_balance_list = balance(access_key, secret_key, market_name, prd_nm)
+        for _ in range(6):
+            if not cancelled_orders or all(float(item['locked_volume']) == 0 for item in raw_balance_list):
+                break
+            time.sleep(0.5)
+            raw_balance_list = balance(access_key, secret_key, market_name, prd_nm)
 
         # 잔고조회의 매수평균가, 보유수량 가져오기                     
         hold_price = 0
