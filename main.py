@@ -7,7 +7,7 @@ from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open,
 from typing import List, Tuple, Union, Optional
 import re
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 # from routers import auth as auth_router
 from routers import cust_mng as cust_mng_router
@@ -488,10 +488,10 @@ def build_order_form_blocks(m: str, c: str, f: str, order_no: str, order_text: s
     return blocks
 
 def build_order_close_form_blocks(m: str, c: str, start: Optional[str] = None, end: Optional[str] = None) -> list:
-    # 기간 선택 : 시작일(기본 올해 1월 1일) ~ 종료일(기본 현재일), 날짜 형식 YYYY-MM-DD
+    # 기간 선택 : 시작일(기본 현재일 기준 그해 1월 1일) ~ 종료일(기본 전일), 날짜 형식 YYYY-MM-DD
     today = datetime.today()
     start = start or today.replace(month=1, day=1).strftime("%Y-%m-%d")
-    end = end or today.strftime("%Y-%m-%d")
+    end = end or (today - timedelta(days=1)).strftime("%Y-%m-%d")
     return [
         section(f"*[{m}] [{c}] 종료주문내역* 조회 기간을 선택하세요"),
         date_input("order_close_start_block", "order_close_start", "시작일", start),
