@@ -1708,15 +1708,16 @@ def get_order_close(
     market_name: str,
     prd_nm: Optional[str] = None,
     order_no: Optional[str] = None,
-    start_dt: Optional[str] = None
+    start_dt: Optional[str] = None,
+    end_dt: Optional[str] = None
 ) -> List[Tuple[str, str]]:
     db = SessionLocal()
     try:
         # 고객명에 의한 고객정보 조회
         cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
-        
+
         text_lines = []
-        
+
         date_obj = datetime.strptime(start_dt, '%Y%m%d')
         start_dt_str = date_obj.strftime('%Y%m%d') + '000000'
 
@@ -1727,6 +1728,8 @@ def get_order_close(
             "ord_dtm >= :start_dt"
         ]
 
+        if end_dt:
+            conditions.append("ord_dtm <= :end_dt")
         if prd_nm:
             conditions.append("prd_nm = :prd_nm")
         if order_no:
@@ -1757,6 +1760,8 @@ def get_order_close(
             "cust_num": cust_info[0],
             "start_dt": start_dt_str,
         }
+        if end_dt:
+            params["end_dt"] = datetime.strptime(end_dt, '%Y%m%d').strftime('%Y%m%d') + '235959'
         if prd_nm:
             params["prd_nm"] = "KRW-" + prd_nm
         if order_no:

@@ -7,7 +7,7 @@ from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open,
 from typing import List, Tuple, Union, Optional
 import re
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import quote
 # from routers import auth as auth_router
 from routers import cust_mng as cust_mng_router
@@ -31,128 +31,6 @@ MAX_TEXT_LENGTH = 3000
 @app.get("/")
 def read_root():
     return {"message": "Hello, World!"}
-
-def build_blocks(
-    text_lines: list[dict],
-    market_name: str,
-    cust_nm: str,
-    prd_nm: str = None,
-    order_no: str = None,
-    start_dt: str = None,
-    page: int = 1,
-    page_size: int = 15
-) -> list[dict]:
-    blocks = []
-
-    # 헤더 블록
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"*[{market_name}] [{cust_nm}] 주문 조회 (Page {page})*"
-        }
-    })
-
-    # 페이지네이션 적용
-    start_idx = (page - 1) * page_size
-    end_idx = start_idx + page_size
-    page_lines = text_lines[start_idx:end_idx]
-
-    for line in page_lines:
-        if isinstance(line, dict):
-            order_text = line.get("text", "").strip()
-            extracted_order_no = line.get("order_no")
-        elif isinstance(line, tuple) and len(line) == 2:
-            order_text, extracted_order_no = line
-            order_text = order_text.strip()
-        else:
-            continue
-
-        # 주문 정보 텍스트 블록
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": order_text
-            }
-        })
-
-        # 주문 버튼 블록 (order_no 존재 시만)
-        if extracted_order_no and extracted_order_no.strip():
-            value_payload = {
-                "market_name": market_name,
-                "cust_nm": cust_nm,
-                "order_no": extracted_order_no
-            }
-            encoded_value = encode_value(value_payload)
-
-            blocks.append({
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "주문번호 표시"},
-                        "value": extracted_order_no,
-                        "action_id": "copy_uuid_action"
-                    }
-                ]
-            })
-
-        # 구분선
-        blocks.append({"type": "divider"})
-
-    def safe(val):
-        return val if val is not None else "_"
-
-    # 이전 페이지 버튼
-    if page > 1:
-        prev_payload = {
-            "market_name": market_name,
-            "cust_nm": cust_nm,
-            "prd_nm": safe(prd_nm),
-            "order_no": safe(order_no),
-            "start_dt": safe(start_dt),
-            "page": page - 1,
-            "page_size": page_size
-        }
-        encoded_prev = encode_value(prev_payload)
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "⬅ 이전"},
-                    "value": encoded_prev,
-                    "action_id": "paginate_order_close"
-                }
-            ]
-        })
-
-    # 다음 페이지 버튼
-    if end_idx < len(text_lines):
-        next_payload = {
-            "market_name": market_name,
-            "cust_nm": cust_nm,
-            "prd_nm": safe(prd_nm),
-            "order_no": safe(order_no),
-            "start_dt": safe(start_dt),
-            "page": page + 1,
-            "page_size": page_size
-        }
-        encoded_next = encode_value(next_payload)
-        blocks.append({
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "다음 ➡"},
-                    "value": encoded_next,
-                    "action_id": "paginate_order_close"
-                }
-            ]
-        })
-
-    return blocks
 
 def encode_value(payload: dict) -> str:
     """
@@ -325,11 +203,13 @@ FEATURE_LABELS = {
     "order_open": "대기주문내역",
     "order_update": "주문정정",
     "order_cancel": "주문취소",
+    "order_close": "종료주문내역",
 }
 HOLDING_FEATURES = ["holding_list", "holding_update"]
-TRADE_FEATURES = ["buy", "sell", "order_open", "order_update", "order_cancel"]
+TRADE_FEATURES = ["buy", "sell", "order_open", "order_update", "order_cancel", "order_close"]
 UPBIT_ONLY_FEATURES = ["order_update"]
 MAX_LIST_ITEMS = 40
+ORDER_CLOSE_PAGE_SIZE = 15
 
 def section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
@@ -390,11 +270,24 @@ def fmt_num(value) -> str:
         return f"{int(number):,}"
     return f"{number:,.8f}".rstrip("0").rstrip(".")
 
-def get_state_value(payload: dict, action_id: str) -> Optional[str]:
+def get_state_value(payload: dict, action_id: str, key: str = "value") -> Optional[str]:
     for block in payload.get("state", {}).get("values", {}).values():
         if action_id in block:
-            return block[action_id].get("value")
+            return block[action_id].get(key)
     return None
+
+def date_input(block_id: str, action_id: str, label: str, initial_date: str) -> dict:
+    return {
+        "type": "input",
+        "block_id": block_id,
+        "element": {
+            "type": "datepicker",
+            "action_id": action_id,
+            "initial_date": initial_date,
+            "placeholder": {"type": "plain_text", "text": f"{label}을 선택해주세요"},
+        },
+        "label": {"type": "plain_text", "text": label},
+    }
 
 def parse_number(value: Optional[str], label: str, allow_zero: bool = True) -> float:
     if value is None or not value.strip():
@@ -594,6 +487,53 @@ def build_order_form_blocks(m: str, c: str, f: str, order_no: str, order_text: s
     blocks.append(back_actions(f, m=m, c=c))
     return blocks
 
+def build_order_close_form_blocks(m: str, c: str, start: Optional[str] = None, end: Optional[str] = None) -> list:
+    # 기간 선택 : 시작일(기본 올해 1월 1일) ~ 종료일(기본 현재일), 날짜 형식 YYYY-MM-DD
+    today = datetime.today()
+    start = start or today.replace(month=1, day=1).strftime("%Y-%m-%d")
+    end = end or today.strftime("%Y-%m-%d")
+    return [
+        section(f"*[{m}] [{c}] 종료주문내역* 조회 기간을 선택하세요"),
+        date_input("order_close_start_block", "order_close_start", "시작일", start),
+        date_input("order_close_end_block", "order_close_end", "종료일", end),
+        actions([button("조회", "order_close_query", {"m": m, "c": c}, style="primary")]),
+        back_actions("cust", m=m, f="order_close"),
+    ]
+
+def build_order_close_result_blocks(m: str, c: str, start: str, end: str, page: int = 1) -> list:
+    result = get_order_close(
+        cust_nm=c,
+        market_name=m,
+        start_dt=start.replace("-", ""),
+        end_dt=end.replace("-", "")
+    )
+    lines = normalize_result_lines(result)
+    orders = [line for line in lines if line[1]]
+    total_pages = max(1, -(-len(orders) // ORDER_CLOSE_PAGE_SIZE))
+    page = min(max(1, page), total_pages)
+
+    blocks = [section(f"*[{m}] [{c}] 종료주문내역*\n기간: {start} ~ {end} | 총 {len(orders)}건 (Page {page}/{total_pages})")]
+    if not orders:
+        blocks.append(section("종료된 주문이 없습니다."))
+    for order_text, order_no in orders[(page - 1) * ORDER_CLOSE_PAGE_SIZE: page * ORDER_CLOSE_PAGE_SIZE]:
+        block = section(order_text)
+        block["accessory"] = {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "주문번호 표시"},
+            "value": order_no,
+            "action_id": "copy_uuid_action",
+        }
+        blocks.append(block)
+
+    nav = {"to": "order_close_result", "m": m, "c": c, "s": start, "e": end}
+    page_buttons = []
+    if page > 1:
+        page_buttons.append(button("⬅ 이전 페이지", "go_page_prev", {**nav, "page": page - 1}))
+    if page < total_pages:
+        page_buttons.append(button("다음 페이지 ➡", "go_page_next", {**nav, "page": page + 1}))
+    blocks.append(actions(page_buttons + [button("처음으로", "go_home", {"to": "market"})]))
+    return blocks
+
 def render_screen(nav: dict, user_id: str) -> list:
     to, m, c = nav.get("to"), nav.get("m"), nav.get("c")
 
@@ -623,6 +563,10 @@ def render_screen(nav: dict, user_id: str) -> list:
         return build_order_list_blocks(m, c, to)
     if to == "order_form":
         return build_order_form_blocks(m, c, nav["f"], nav["o"], nav["s"])
+    if to == "order_close":
+        return build_order_close_form_blocks(m, c)
+    if to == "order_close_result":
+        return build_order_close_result_blocks(m, c, nav["s"], nav["e"], nav.get("page", 1))
     raise ValueError(f"알 수 없는 화면입니다: {to}")
 
 def get_tunnel_url(nickname: Optional[str] = None) -> str:
@@ -696,7 +640,7 @@ async def process_slack_interactivity(payload: dict):
 
     # 콤보박스(select) 선택 자체는 값 저장용으로만 사용되며, 제출 버튼 클릭시에만 처리
     # (input_prd_nm 은 보유종목 수정 화면에서 선택시 기존 값을 표시하기 위해 예외적으로 처리)
-    if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select") and action_id != "input_prd_nm":
+    if action_type in ("static_select", "external_select", "users_select", "conversations_select", "channels_select", "multi_static_select", "datepicker") and action_id != "input_prd_nm":
         return
 
     message = {}
@@ -1231,210 +1175,30 @@ async def process_slack_interactivity(payload: dict):
                 "text": f"*[{market_name}] 관심종목 등록/수정 중 오류 발생* : {e}"
             }
 
-    elif action_id == "order_close_action":
+    elif action_id == "order_close_query":
         selection = json.loads(payload["actions"][0]["value"])
-        market_name = selection["market_name"]
-        cust_nm = selection["cust_nm"]
-        
-        # Base64 인코딩된 value 생성
-        encoded_value = encode_value({
-            "market_name": market_name,
-            "cust_nm": cust_nm
-        })
-        
+        market_name, cust_nm = selection["m"], selection["c"]
+        start = get_state_value(payload, "order_close_start", "selected_date")
+        end = get_state_value(payload, "order_close_end", "selected_date")
+
+        try:
+            if not start or not end:
+                raise ValueError("시작일과 종료일을 선택해주세요.")
+            if start > end:
+                raise ValueError(f"시작일({start})이 종료일({end})보다 늦습니다.")
+            blocks = build_order_close_result_blocks(market_name, cust_nm, start, end)
+        except ValueError as e:
+            blocks = [section(f"*[{market_name}] [{cust_nm}] 종료주문내역 입력 오류* : {e}")] + build_order_close_form_blocks(market_name, cust_nm, start, end)
+        except Exception as e:
+            blocks = build_error_blocks(f"[{market_name}] [{cust_nm}] 종료주문내역 조회", e)
+
         message = {
             "response_type": "ephemeral",
             "replace_original": True,
-            "blocks": [
-                {
-                    "type": "input",
-                    "block_id": "prd_nm_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_prd_nm",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "상품명을 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "상품명"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "ord_no_input_block",
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "input_ord_no",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "주문번호를 입력해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "주문번호"
-                    }
-                },
-                {
-                    "type": "input",
-                    "block_id": "start_dt_input_block",
-                    "element": {
-                        "type": "datepicker",
-                        "action_id": "input_start_dt",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "주문조회 시작일을 선택해주세요"
-                        }
-                    },
-                    "label": {
-                        "type": "plain_text",
-                        "text": "주문조회 시작일"
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "종료주문 조회",
-                                "emoji": True
-                            },
-                            "value": encoded_value,
-                            "action_id": "order_close_proc"
-                        }
-                    ]
-                }
-            ]
+            "text": f"[{market_name}] [{cust_nm}] 종료주문내역",
+            "blocks": blocks
         }
-    
-    elif action_id == "order_close_proc":
-        try:
-            decoded = decode_value(payload["actions"][0]["value"])
-            market_name = decoded.get("market_name")
-            cust_nm = decoded.get("cust_nm")
-            order_no_from_button = decoded.get("order_no")
 
-            state_values = payload.get("state", {}).get("values", {})
-
-            prd_nm = None
-            order_no = None
-            start_dt = None
-
-            for block in state_values.values():
-                if not isinstance(block, dict):
-                    continue
-
-                prd_nm_val = block.get("input_prd_nm", {}).get("value")
-                if prd_nm_val:
-                    if not re.fullmatch(r'[A-Za-z]+', prd_nm_val):
-                        raise ValueError("상품명은 영문 알파벳만 입력 가능합니다.")
-                    prd_nm = prd_nm_val.upper()
-
-                ord_no_val = block.get("input_ord_no", {}).get("value")
-                if ord_no_val:
-                    order_no = ord_no_val
-
-                start_dt_val = block.get("input_start_dt", {}).get("selected_date")
-                if start_dt_val:
-                    start_dt = start_dt_val.replace("-", "")
-
-            # fallback: 입력이 없으면 버튼에서 받은 주문번호 사용
-            order_no = order_no or order_no_from_button
-            
-            if not start_dt or start_dt == "_" or not isinstance(start_dt, str):
-                start_dt = (datetime.today() - timedelta(days=30)).strftime("%Y%m%d")
-
-            # 종료 주문 데이터 조회
-            order_close_info = get_order_close(
-                cust_nm=cust_nm,
-                market_name=market_name,
-                prd_nm=prd_nm,
-                order_no=order_no,
-                start_dt=start_dt
-            )
-
-            # 블록 생성
-            blocks = build_blocks(
-                text_lines=order_close_info,
-                market_name=market_name,
-                cust_nm=cust_nm,
-                prd_nm=prd_nm,
-                order_no=order_no,
-                start_dt=start_dt,
-                page=1,
-                page_size=15
-            )
-
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 종료 주문 조회*",
-                "blocks": blocks
-            }
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 종료 주문 조회 중 오류 발생* : {e}"
-            }
-
-    elif action_id == "paginate_order_close":
-        try:
-            decoded = decode_value(payload["actions"][0]["value"])
-
-            market_name = decoded.get("market_name")
-            cust_nm = decoded.get("cust_nm")
-            prd_nm = decoded.get("prd_nm")
-            order_no = decoded.get("order_no")
-            start_dt = decoded.get("start_dt")
-            page = int(decoded.get("page", 1))
-            page_size = int(decoded.get("page_size", 15))
-
-            def none_if_placeholder(val):
-                return None if val in ("_", "-", "") else val
-
-            prd_nm = none_if_placeholder(prd_nm)
-            order_no = none_if_placeholder(order_no)
-            start_dt = none_if_placeholder(start_dt)
-
-            order_close_info = get_order_close(
-                cust_nm=cust_nm,
-                market_name=market_name,
-                prd_nm=prd_nm,
-                order_no=order_no,
-                start_dt=start_dt
-            )
-
-            blocks = build_blocks(
-                text_lines=order_close_info,
-                market_name=market_name,
-                cust_nm=cust_nm,
-                prd_nm=prd_nm,
-                order_no=order_no,
-                start_dt=start_dt,
-                page=page,
-                page_size=page_size
-            )
-
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"*[{market_name}] [{cust_nm}] 종료 주문 조회 (Page {page})*",
-                "blocks": blocks
-            }
-
-        except Exception as e:
-            message = {
-                "response_type": "ephemeral",
-                "replace_original": True,
-                "text": f"페이지 이동 중 오류 발생: {e}"
-            }
-    
     elif action_id == "copy_uuid_action":
         uuid_val = payload["actions"][0]["value"]
         message = {
