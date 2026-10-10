@@ -8,9 +8,9 @@ import uuid
 import jwt
 import requests
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from decimal import Decimal, ROUND_HALF_UP, getcontext, ROUND_DOWN, InvalidOperation, localcontext
 from typing import Optional
 from typing import List, Tuple, Optional
@@ -49,7 +49,11 @@ def get_ticker(market_name: str, prd_nm: str) -> dict:
     res = requests.get(api_url + "/v1/ticker", params={"markets": "KRW-" + prd_nm}, timeout=10).json()
     if not isinstance(res, list) or len(res) < 1:
         raise ValueError(f"{prd_nm} 시세 정보를 조회할 수 없습니다.")
-    return {"trade_price": float(res[0]['trade_price']), "low_price": float(res[0]['low_price'])}
+    return {
+        "trade_price": float(res[0]['trade_price']),
+        "low_price": float(res[0]['low_price']),
+        "high_price": float(res[0]['high_price']),
+    }
 
 def calc_buy_plan(buy_price: float, loss_price: float, buy_amt: float, loss_amt: float) -> dict:
     # 손절금액 기준 / 매수금액 기준 매수량 산정 (Batch/reservebot.py 매수주문 미리보기와 동일 공식, 수량은 소수점 8자리 절사)
@@ -1784,6 +1788,404 @@ def get_order_close(
     except Exception as e:
         # 예외 발생 시 상위로 올림 → try-catch로 처리 가능하게
         raise RuntimeError(f"종료된 주문조회 실패: {e}")
-    
+
+    finally:
+        db.close()
+
+# ────────────────────────────────────────────────────────────────────────────
+# 추적관리 (bit_trading_trail)
+# ────────────────────────────────────────────────────────────────────────────
+def _fmt(value) -> str:
+    # 정수는 천단위 콤마, 소수는 소수점 8자리까지 표시 (불필요한 0 제거)
+    number = float(value)
+    if number == int(number):
+        return f"{int(number):,}"
+    return f"{number:,.8f}".rstrip("0").rstrip(".")
+
+TRAIL_ACTIVE_TPS = ('1', '2', 'L')
+TRAIL_PAUSED_TPS = ('P', 'C', 'U')
+
+def get_business_day(market_name: str, now: Optional[datetime] = None) -> datetime:
+    # trail_day 기준일 : UPBIT는 당일 09:00부터 익일 08:59까지, BITHUMB는 당일 00:00부터 23:59까지 (frm_svc/bitTradingSet.py 와 동일 규칙)
+    now = now or datetime.now()
+    if market_name == 'UPBIT' and now.hour < 9:
+        now = now - timedelta(days=1)
+    return now
+
+def get_trail_days(market_name: str, now: Optional[datetime] = None) -> Tuple[str, str]:
+    # (현재 영업일, 전 영업일) YYYYMMDD
+    biz_dt = get_business_day(market_name, now)
+    return biz_dt.strftime("%Y%m%d"), (biz_dt - timedelta(days=1)).strftime("%Y%m%d")
+
+def _trail_cust(db, cust_nm: str, market_name: str) -> Tuple[str, str]:
+    cust_info = cust_mng_service.get_cust_info_by_cust_nm(db, cust_nm, market_name)
+    if not cust_info:
+        raise ValueError(f"[{market_name}] {cust_nm} 고객정보가 없습니다.")
+    return cust_info[0], cust_info[3]
+
+def _prd_label(prd_nm: str) -> str:
+    return prd_nm.split('-')[-1] if prd_nm and '-' in prd_nm else prd_nm
+
+TRAIL_ROW_COLUMNS = """
+    id, prd_nm, trail_day, trail_dtm, trail_tp, basic_price, basic_vol, basic_amt,
+    stop_price, action_price, exit_price, trail_plan, loss_amt, trade_result
+"""
+
+def _wait_state_reset_sql() -> str:
+    # 변경된 이탈가/수행가 기준으로 다시 판단하도록 대기 중인 이탈 감지 상태 초기화 (분봉 처리 위치 last_min_key 만 유지)
+    return "wait_state = jsonb_strip_nulls(jsonb_build_object('last_min_key', wait_state->'last_min_key'))"
+
+def _clear_same_state_rows(db, cust_num: str, market_name: str, prd_nm: str, trail_day: str, trail_tp: str, keep_id: int) -> int:
+    # (cust_num, market_name, prd_nm, trail_day, trail_tp) 유니크 제약 충돌 방지 : 변경할 상태와 같은 상태의 기존 행 정리
+    result = db.execute(text("""
+        DELETE FROM bit_trading_trail
+        WHERE cust_num = :cust_num AND market_name = :market_name AND prd_nm = :prd_nm
+        AND trail_day = :trail_day AND trail_tp = :trail_tp AND id <> :keep_id
+    """), {"cust_num": cust_num, "market_name": market_name, "prd_nm": prd_nm, "trail_day": trail_day, "trail_tp": trail_tp, "keep_id": keep_id})
+    return result.rowcount
+
+def _latest_trail_row(db, cust_num: str, market_name: str, prd_nm: str, trail_day: str, trail_tps: tuple):
+    return db.execute(text(f"""
+        SELECT {TRAIL_ROW_COLUMNS}
+        FROM bit_trading_trail
+        WHERE cust_num = :cust_num AND market_name = :market_name AND prd_nm = :prd_nm
+        AND trail_day = :trail_day AND trail_tp IN :trail_tps AND basic_vol > 0
+        ORDER BY trail_dtm DESC, id DESC
+        LIMIT 1
+    """).bindparams(bindparam("trail_tps", expanding=True)),
+        {"cust_num": cust_num, "market_name": market_name, "prd_nm": prd_nm, "trail_day": trail_day, "trail_tps": list(trail_tps)}).mappings().first()
+
+def get_trail_register_targets(cust_nm: str, market_name: str) -> list:
+    # 추적등록 대상 : balance_info 보유종목 (매매계획 홀딩·투자 제외)
+    db = SessionLocal()
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        return [dict(row) for row in db.execute(text("""
+            SELECT prd_nm, hold_price, hold_volume, hold_amt, stop_price, action_price, exit_price
+            FROM balance_info
+            WHERE cust_num = :cust_num AND market_name = :market_name
+            AND prd_nm != 'KRW-KRW'
+            AND (trading_plan IS NULL OR trading_plan NOT IN ('i', 'h'))
+            AND hold_volume > 0
+            ORDER BY prd_nm
+        """), {"cust_num": cust_num, "market_name": market_name}).mappings().all()]
+    finally:
+        db.close()
+
+def get_trail_rows(cust_nm: str, market_name: str, trail_tps: Optional[tuple] = None) -> Tuple[str, list]:
+    # 현재 영업일 매매추적정보 조회 → (영업일, 행 리스트)
+    # trail_tps 지정시 해당 상태의 보유수량 존재 대상을 종목별 최신 1건으로 조회 (추적변경/재개/멈춤 대상)
+    db = SessionLocal()
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        params = {"cust_num": cust_num, "market_name": market_name, "trail_day": today}
+
+        if trail_tps:
+            query = text(f"""
+                SELECT DISTINCT ON (prd_nm) {TRAIL_ROW_COLUMNS}
+                FROM bit_trading_trail
+                WHERE cust_num = :cust_num AND market_name = :market_name AND trail_day = :trail_day
+                AND trail_tp IN :trail_tps AND basic_vol > 0
+                ORDER BY prd_nm, trail_dtm DESC, id DESC
+            """).bindparams(bindparam("trail_tps", expanding=True))
+            params["trail_tps"] = list(trail_tps)
+        else:
+            query = text(f"""
+                SELECT {TRAIL_ROW_COLUMNS}
+                FROM bit_trading_trail
+                WHERE cust_num = :cust_num AND market_name = :market_name AND trail_day = :trail_day
+                ORDER BY prd_nm, trail_dtm, id
+            """)
+
+        return today, [dict(row) for row in db.execute(query, params).mappings().all()]
+    finally:
+        db.close()
+
+def get_trail_row(cust_nm: str, market_name: str, prd_nm: str, trail_tps: tuple) -> Tuple[str, Optional[dict]]:
+    db = SessionLocal()
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        row = _latest_trail_row(db, cust_num, market_name, prd_nm, today, trail_tps)
+        return today, dict(row) if row else None
+    finally:
+        db.close()
+
+def trail_register(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: float) -> str:
+    db = SessionLocal()
+    label = _prd_label(prd_nm)
+    try:
+        cust_num, acct_no = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+
+        holding = db.execute(text("""
+            SELECT acct_no, hold_price, hold_volume, hold_amt
+            FROM balance_info
+            WHERE cust_num = :cust_num AND market_name = :market_name AND prd_nm = :prd_nm
+            AND (trading_plan IS NULL OR trading_plan NOT IN ('i', 'h'))
+            AND hold_volume > 0
+        """), {"cust_num": cust_num, "market_name": market_name, "prd_nm": prd_nm}).mappings().first()
+        if not holding:
+            return f"*{label}* : 보유종목(매매계획 홀딩·투자 제외)에 존재하지 않아 추적등록을 할 수 없습니다."
+
+        if _latest_trail_row(db, cust_num, market_name, prd_nm, today, TRAIL_ACTIVE_TPS):
+            return f"*{label}* : 오늘({today}) 진행 중인 추적정보가 있습니다. 추적변경을 사용하세요."
+
+        basic_price = float(holding['hold_price'])
+        basic_vol = float(holding['hold_volume'])
+        loss_amt = int((basic_price - stop_price) * basic_vol)
+        now = datetime.now()
+
+        db.execute(text("""
+            INSERT INTO bit_trading_trail (
+                acct_no, cust_num, market_name, prd_nm,
+                trail_day, trail_dtm, trail_tp,
+                basic_price, basic_vol, basic_amt,
+                stop_price, action_price, exit_price, trade_tp, loss_amt, trail_plan,
+                regr_id, reg_date, chgr_id, chg_date
+            ) VALUES (
+                :acct_no, :cust_num, :market_name, :prd_nm,
+                :trail_day, :trail_dtm, '1',
+                :basic_price, :basic_vol, :basic_amt,
+                :stop_price, :action_price, :exit_price, 'M', :loss_amt, :trail_plan,
+                :user_id, :now, :user_id, :now
+            )
+        """), {
+            "acct_no": holding['acct_no'] or acct_no, "cust_num": cust_num, "market_name": market_name, "prd_nm": prd_nm,
+            "trail_day": today, "trail_dtm": now.strftime("%H%M%S"),
+            "basic_price": basic_price, "basic_vol": basic_vol, "basic_amt": holding['hold_amt'],
+            "stop_price": stop_price, "action_price": action_price, "exit_price": exit_price,
+            "loss_amt": loss_amt, "trail_plan": trail_plan, "user_id": user_id, "now": now,
+        })
+        db.commit()
+
+        return (
+            f"*{label}* 추적등록 완료 (영업일 {today}, 추적대기)\n"
+            f"> 기준가: {_fmt(basic_price)}, 보유량: {_fmt(basic_vol)}, 기준금액: {_fmt(holding['hold_amt'])}원\n"
+            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, 매도비율: {_fmt(trail_plan)}%\n"
+            f"> 손실금액: {_fmt(loss_amt)}원"
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def trail_change(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: float) -> str:
+    # 추적변경 : 추적상태는 1(추적대기)로 변경하되 2(목표가 돌파 후 트레일링)는 유지, trail_dtm 현재시각 갱신
+    db = SessionLocal()
+    label = _prd_label(prd_nm)
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        row = _latest_trail_row(db, cust_num, market_name, prd_nm, today, TRAIL_ACTIVE_TPS)
+        if not row:
+            return f"*{label}* : 오늘({today}) 추적변경 대상(추적대기·트레일링·장기추적)이 없습니다."
+
+        new_tp = '2' if row['trail_tp'] == '2' else '1'
+        cleared = _clear_same_state_rows(db, cust_num, market_name, prd_nm, today, new_tp, row['id'])
+        loss_amt = int((float(row['basic_price']) - stop_price) * float(row['basic_vol']))
+
+        db.execute(text(f"""
+            UPDATE bit_trading_trail SET
+                stop_price = :stop_price, action_price = :action_price, exit_price = :exit_price,
+                trail_plan = :trail_plan, loss_amt = :loss_amt, trail_tp = :trail_tp, trail_dtm = :trail_dtm,
+                {_wait_state_reset_sql()}, chgr_id = :user_id, chg_date = :now
+            WHERE id = :id
+        """), {
+            "stop_price": stop_price, "action_price": action_price, "exit_price": exit_price, "trail_plan": trail_plan,
+            "loss_amt": loss_amt, "trail_tp": new_tp, "trail_dtm": datetime.now().strftime("%H%M%S"),
+            "user_id": user_id, "now": datetime.now(), "id": row['id'],
+        })
+        db.commit()
+
+        return (
+            f"*{label}* 추적변경 완료 (추적상태: {row['trail_tp']} → {new_tp})\n"
+            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, 매도비율: {_fmt(trail_plan)}%"
+            + (f"\n> 같은 상태의 기존 추적정보 {cleared}건 정리" if cleared else "")
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def trail_resume(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_tp: str) -> str:
+    # 추적재개 : 멈춤·취소·변경(P/C/U) 대상을 선택한 추적상태(L/1/2)로 변경
+    db = SessionLocal()
+    label = _prd_label(prd_nm)
+    try:
+        if trail_tp not in TRAIL_ACTIVE_TPS:
+            raise ValueError("추적상태는 장기추적(L), 추적대기(1), 트레일링(2) 중에서 선택해주세요.")
+
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        row = _latest_trail_row(db, cust_num, market_name, prd_nm, today, TRAIL_PAUSED_TPS)
+        if not row:
+            return f"*{label}* : 오늘({today}) 추적재개 대상(멈춤·취소·변경)이 없습니다."
+        if _latest_trail_row(db, cust_num, market_name, prd_nm, today, TRAIL_ACTIVE_TPS):
+            return f"*{label}* : 오늘({today}) 이미 진행 중인 추적정보가 있어 재개할 수 없습니다. 추적변경을 사용하세요."
+
+        cleared = _clear_same_state_rows(db, cust_num, market_name, prd_nm, today, trail_tp, row['id'])
+
+        db.execute(text(f"""
+            UPDATE bit_trading_trail SET
+                stop_price = :stop_price, action_price = :action_price, exit_price = :exit_price,
+                trail_tp = :trail_tp, trail_dtm = :trail_dtm,
+                {_wait_state_reset_sql()}, chgr_id = :user_id, chg_date = :now
+            WHERE id = :id
+        """), {
+            "stop_price": stop_price, "action_price": action_price, "exit_price": exit_price,
+            "trail_tp": trail_tp, "trail_dtm": datetime.now().strftime("%H%M%S"),
+            "user_id": user_id, "now": datetime.now(), "id": row['id'],
+        })
+        db.commit()
+
+        return (
+            f"*{label}* 추적재개 완료 (추적상태: {row['trail_tp']} → {trail_tp})\n"
+            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}"
+            + (f"\n> 같은 상태의 기존 추적정보 {cleared}건 정리" if cleared else "")
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def trail_pause(cust_nm: str, market_name: str, prd_nm: str) -> str:
+    # 추적멈춤 : 진행 중(1/2/L) 대상을 P(멈춤)로 변경
+    db = SessionLocal()
+    label = _prd_label(prd_nm)
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        row = _latest_trail_row(db, cust_num, market_name, prd_nm, today, TRAIL_ACTIVE_TPS)
+        if not row:
+            return f"*{label}* : 오늘({today}) 추적멈춤 대상(추적대기·트레일링·장기추적)이 없습니다."
+
+        cleared = _clear_same_state_rows(db, cust_num, market_name, prd_nm, today, 'P', row['id'])
+
+        db.execute(text("""
+            UPDATE bit_trading_trail SET trail_tp = 'P', chgr_id = :user_id, chg_date = :now
+            WHERE id = :id
+        """), {"user_id": user_id, "now": datetime.now(), "id": row['id']})
+        db.commit()
+
+        return (
+            f"*{label}* 추적멈춤 완료 (추적상태: {row['trail_tp']} → P)"
+            + (f"\n> 같은 상태의 기존 추적정보 {cleared}건 정리" if cleared else "")
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def trail_delete_today(cust_nm: str, market_name: str) -> Tuple[str, int]:
+    # 추적삭제 : 고객의 현재 영업일 추적정보 전체 삭제 → (영업일, 삭제건수)
+    db = SessionLocal()
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, _ = get_trail_days(market_name)
+        result = db.execute(text("""
+            DELETE FROM bit_trading_trail
+            WHERE cust_num = :cust_num AND market_name = :market_name AND trail_day = :trail_day
+        """), {"cust_num": cust_num, "market_name": market_name, "trail_day": today})
+        db.commit()
+        return today, result.rowcount
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def trail_prepare(cust_nm: str, market_name: str) -> dict:
+    # 추적준비 : frm_svc/bitTradingSet.py 의 매매추적정보 생성 로직을 선택 고객 대상으로 수행
+    # 전일 추적상태 승계 : 3/L → L, P/C/U → P, 그 외 → 1
+    # 오늘 추적정보가 이미 있는 종목은 생성하지 않음 (멈춤 등 당일 변경 상태 보존)
+    db = SessionLocal()
+    try:
+        cust_num, _ = _trail_cust(db, cust_nm, market_name)
+        today, prev_day = get_trail_days(market_name)
+
+        targets = db.execute(text("""
+            SELECT
+                A.acct_no, A.prd_nm, A.hold_price, A.hold_volume, A.hold_amt,
+                A.stop_price, A.action_price, A.exit_price,
+                T.trail_tp AS prev_trail_tp,
+                EXISTS (
+                    SELECT 1 FROM bit_trading_trail E
+                    WHERE E.cust_num = A.cust_num AND E.market_name = A.market_name
+                    AND E.prd_nm = A.prd_nm AND E.trail_day = :today
+                ) AS exists_today
+            FROM balance_info A
+            LEFT JOIN LATERAL (
+                SELECT trail_tp
+                FROM bit_trading_trail
+                WHERE cust_num = A.cust_num
+                AND market_name = A.market_name
+                AND prd_nm = A.prd_nm
+                AND trail_day = :prev_day
+                AND trail_tp IN ('1','2','3','L','P','C','U')
+                ORDER BY trail_dtm DESC
+                LIMIT 1
+            ) T ON true
+            WHERE A.cust_num = :cust_num
+            AND A.market_name = :market_name
+            AND A.prd_nm != 'KRW-KRW'
+            AND (A.trading_plan IS NULL OR A.trading_plan NOT IN ('i', 'h'))
+            AND A.hold_volume > 0
+            ORDER BY A.prd_nm
+        """), {"cust_num": cust_num, "market_name": market_name, "today": today, "prev_day": prev_day}).mappings().all()
+
+        created, skipped = [], []
+        now = datetime.now()
+        for row in targets:
+            if row['exists_today']:
+                skipped.append(_prd_label(row['prd_nm']))
+                continue
+
+            basic_price = float(row['hold_price'] or 0)
+            basic_vol = float(row['hold_volume'] or 0)
+            stop_price = float(row['stop_price'] or 0)
+            action_price = float(row['action_price'] or 0)
+            exit_price = float(row['exit_price'] or 0)
+            loss_amt = int((basic_price - stop_price) * basic_vol) if stop_price > 0 else 0
+            prev_tp = row['prev_trail_tp']
+            trail_tp = 'L' if prev_tp in ('3', 'L') else 'P' if prev_tp in TRAIL_PAUSED_TPS else '1'
+
+            result = db.execute(text("""
+                INSERT INTO bit_trading_trail (
+                    acct_no, cust_num, market_name, prd_nm,
+                    trail_day, trail_dtm, trail_tp,
+                    basic_price, basic_vol, basic_amt,
+                    stop_price, action_price, exit_price, trade_tp, loss_amt,
+                    regr_id, reg_date, chgr_id, chg_date
+                ) VALUES (
+                    :acct_no, :cust_num, :market_name, :prd_nm,
+                    :trail_day, :trail_dtm, :trail_tp,
+                    :basic_price, :basic_vol, :basic_amt,
+                    :stop_price, :action_price, :exit_price, 'M', :loss_amt,
+                    :user_id, :now, :user_id, :now
+                )
+                ON CONFLICT (cust_num, market_name, prd_nm, trail_day, trail_tp) DO NOTHING
+            """), {
+                "acct_no": row['acct_no'], "cust_num": cust_num, "market_name": market_name, "prd_nm": row['prd_nm'],
+                "trail_day": today, "trail_dtm": '090000' if market_name == 'UPBIT' else '000000', "trail_tp": trail_tp,
+                "basic_price": basic_price, "basic_vol": basic_vol, "basic_amt": row['hold_amt'],
+                "stop_price": stop_price, "action_price": action_price, "exit_price": exit_price, "loss_amt": loss_amt,
+                "user_id": user_id, "now": now,
+            })
+            if result.rowcount > 0:
+                created.append(f"{_prd_label(row['prd_nm'])}({trail_tp})")
+            else:
+                skipped.append(_prd_label(row['prd_nm']))
+
+        db.commit()
+        return {"trail_day": today, "target": len(targets), "created": created, "skipped": skipped}
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()

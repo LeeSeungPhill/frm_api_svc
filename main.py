@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import asyncio
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update, get_cust_list, get_ticker, calc_buy_plan, get_sell_holding_list
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update, get_cust_list, get_ticker, calc_buy_plan, get_sell_holding_list, get_trail_days, get_trail_rows, get_trail_row, get_trail_register_targets, trail_register, trail_change, trail_resume, trail_pause, trail_delete_today, trail_prepare, TRAIL_ACTIVE_TPS, TRAIL_PAUSED_TPS
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -204,10 +204,45 @@ FEATURE_LABELS = {
     "order_update": "주문정정",
     "order_cancel": "주문취소",
     "order_close": "종료주문내역",
+    "trail_register": "추적등록",
+    "trail_change": "추적변경",
+    "trail_delete": "추적삭제",
+    "trail_state": "추적상태",
+    "trail_prepare": "추적준비",
+    "trail_query": "추적조회",
+    "trail_resume": "재개",
+    "trail_pause": "멈춤",
 }
+FEATURE_TITLES = {"trail_resume": "추적재개", "trail_pause": "추적멈춤"}
 HOLDING_FEATURES = ["holding_list", "holding_update"]
 TRADE_FEATURES = ["buy", "sell", "order_open", "order_update", "order_cancel", "order_close"]
+TRAIL_FEATURES = ["trail_register", "trail_change", "trail_delete", "trail_state", "trail_prepare", "trail_query"]
+TRAIL_STATE_FEATURES = ["trail_resume", "trail_pause"]
 UPBIT_ONLY_FEATURES = ["order_update"]
+# 하위 메뉴로 이동하는 기능 (고객 선택 없이 다음 메뉴 표시)
+SUBMENU_FEATURES = {"trail_state": "trail_state_menu"}
+# 고객 선택 화면의 "이전" 이동 대상
+PARENT_MENUS = {
+    **{f: "holding_menu" for f in HOLDING_FEATURES},
+    **{f: "trade_menu" for f in TRADE_FEATURES},
+    **{f: "trail_menu" for f in TRAIL_FEATURES},
+    **{f: "trail_state_menu" for f in TRAIL_STATE_FEATURES},
+}
+TRAIL_TP_LABELS = {
+    "1": "추적대기",
+    "2": "목표가 돌파 후 트레일링",
+    "L": "장기추적",
+    "3": "부분매도",
+    "4": "전량매도",
+    "Y": "종료",
+    "P": "멈춤",
+    "C": "취소",
+    "U": "변경",
+}
+TRAIL_RESUME_OPTIONS = ["L", "1", "2"]
+
+def feature_title(f: str) -> str:
+    return FEATURE_TITLES.get(f, FEATURE_LABELS[f])
 MAX_LIST_ITEMS = 40
 ORDER_CLOSE_PAGE_SIZE = 15
 
@@ -356,26 +391,33 @@ def build_main_menu_blocks(m: str) -> list:
         actions([
             button("보유종목", "go_holding_menu", {"to": "holding_menu", "m": m}),
             button("매매관리", "go_trade_menu", {"to": "trade_menu", "m": m}),
+            button("추적관리", "go_trail_menu", {"to": "trail_menu", "m": m}),
         ]),
         back_actions("market"),
     ]
 
-def build_feature_menu_blocks(m: str, title: str, features: list) -> list:
+def build_feature_menu_blocks(m: str, title: str, features: list, back_to: str = "main") -> list:
     features = [f for f in features if m == "UPBIT" or f not in UPBIT_ONLY_FEATURES]
+
+    def feature_nav(f: str) -> dict:
+        if f in SUBMENU_FEATURES:
+            return {"to": SUBMENU_FEATURES[f], "m": m}
+        return {"to": "cust", "m": m, "f": f}
+
     return [
         section(f"*[{m}] {title}* 처리를 선택하세요"),
-        actions([button(FEATURE_LABELS[f], f"go_feature_{f}", {"to": "cust", "m": m, "f": f}) for f in features]),
-        back_actions("main", m=m),
+        actions([button(FEATURE_LABELS[f], f"go_feature_{f}", feature_nav(f)) for f in features]),
+        back_actions(back_to, m=m),
     ]
 
 def build_cust_blocks(m: str, f: str) -> list:
     cust_list = get_cust_list(m)
-    blocks = [section(f"*[{m}] {FEATURE_LABELS[f]}* 고객을 선택하세요")]
+    blocks = [section(f"*[{m}] {feature_title(f)}* 고객을 선택하세요")]
     if cust_list:
         blocks.append(actions([button(c, f"go_cust_{i}", {"to": f, "m": m, "c": c}) for i, c in enumerate(cust_list)]))
     else:
         blocks.append(section("등록된 고객이 없습니다."))
-    blocks.append(back_actions("holding_menu" if f in HOLDING_FEATURES else "trade_menu", m=m))
+    blocks.append(back_actions(PARENT_MENUS[f], m=m))
     return blocks
 
 def build_holding_update_entry_blocks(m: str, c: str) -> list:
@@ -534,6 +576,236 @@ def build_order_close_result_blocks(m: str, c: str, start: str, end: str, page: 
     blocks.append(actions(page_buttons + [button("처음으로", "go_home", {"to": "market"})]))
     return blocks
 
+# ── 추적관리 ─────────────────────────────────────────────────────────────────
+# 가격 0 입력시 적용 기준 (Batch/reservebot.py 주문제외등록 / 추적변경·추적재개와 동일)
+TRAIL_REGISTER_ZERO = {"stop": "현재가", "action": "현재가+5%", "exit": "저가"}
+TRAIL_CHANGE_ZERO = {"stop": "저가", "action": "고가", "exit": "저가"}
+TRAIL_ZERO_RULES = {
+    "현재가": lambda t: t["trade_price"],
+    "현재가+5%": lambda t: t["trade_price"] * 1.05,
+    "저가": lambda t: t["low_price"],
+    "고가": lambda t: t["high_price"],
+}
+TRAIL_PRICE_FIELDS = [("stop", "trail_stop_price", "이탈가"), ("action", "trail_action_price", "수행가"), ("exit", "trail_exit_price", "최종이탈가")]
+
+def trail_prd(prd_nm: str) -> str:
+    return prd_nm.split('-')[-1] if prd_nm and '-' in prd_nm else prd_nm
+
+def trail_tp_label(trail_tp: str) -> str:
+    return f"{TRAIL_TP_LABELS.get(trail_tp, trail_tp)}({trail_tp})"
+
+def fmt_day(day: str) -> str:
+    return f"{day[:4]}-{day[4:6]}-{day[6:8]}" if day and len(day) == 8 else day
+
+def format_trail_row(r: dict) -> str:
+    dtm = r.get("trail_dtm") or ""
+    lines = [
+        f"*{trail_prd(r['prd_nm'])}* | {trail_tp_label(r['trail_tp'])}",
+        f"> 기준가: {fmt_num(r['basic_price'])} | 보유량: {fmt_num(r['basic_vol'])} | 기준금액: {fmt_num(r['basic_amt'])}원",
+        f"> 이탈가: {fmt_num(r['stop_price'])} | 수행가: {fmt_num(r['action_price'])} | 최종이탈가: {fmt_num(r['exit_price'])} | "
+        f"매도비율: {fmt_num(r['trail_plan']) + '%' if r.get('trail_plan') is not None else '-'}",
+        f"> 손실금액: {fmt_num(r['loss_amt'])}원 | 추적시각: {dtm[:2]}:{dtm[2:4]}:{dtm[4:6]}",
+    ]
+    if r.get("trade_result"):
+        lines.append(f"> 처리결과: {r['trade_result']}")
+    return "\n".join(lines)
+
+def read_trail_inputs(payload: dict) -> dict:
+    values = {key: get_state_value(payload, action_id) for key, action_id, _ in TRAIL_PRICE_FIELDS}
+    values["rate"] = get_state_value(payload, "trail_sell_rate")
+    return values
+
+def resolve_trail_prices(m: str, prd_nm: str, raw: dict, zero_rule: dict) -> Tuple[float, float, float]:
+    # 이탈가/수행가/최종이탈가 파싱 → 0 입력 항목은 시세 기준으로 치환 → 가격 관계 검증
+    values = {key: parse_number(raw.get(key), label) for key, _, label in TRAIL_PRICE_FIELDS}
+    if any(v == 0 for v in values.values()):
+        ticker = get_ticker(m, trail_prd(prd_nm))
+        for key, value in values.items():
+            if value == 0:
+                values[key] = round(TRAIL_ZERO_RULES[zero_rule[key]](ticker), 8)
+
+    stop, action, exit_ = values["stop"], values["action"], values["exit"]
+    if action <= stop:
+        raise ValueError(f"수행가({fmt_num(action)})가 이탈가({fmt_num(stop)}) 이하입니다.")
+    if action <= exit_:
+        raise ValueError(f"수행가({fmt_num(action)})가 최종이탈가({fmt_num(exit_)}) 이하입니다.")
+    if stop < exit_:
+        raise ValueError(f"이탈가({fmt_num(stop)})가 최종이탈가({fmt_num(exit_)}) 미만입니다.")
+    return stop, action, exit_
+
+def parse_sell_rate(value: Optional[str]) -> float:
+    rate = parse_number(value, "매도비율", allow_zero=False)
+    if not 1 <= rate <= 100:
+        raise ValueError("매도비율은 1~100 사이로 입력해주세요.")
+    return rate
+
+def trail_value_inputs(zero_rule: dict, prefill: dict, suffix: str = "", with_rate: bool = True) -> list:
+    blocks = [
+        text_input(f"{action_id}_block{suffix}", action_id, f"{label} ({zero_rule[key]}: 0)", f"{label}을(를) 입력해주세요", prefill.get(key))
+        for key, action_id, label in TRAIL_PRICE_FIELDS
+    ]
+    if with_rate:
+        blocks.append(text_input(f"trail_sell_rate_block{suffix}", "trail_sell_rate", "매도비율 (1~100%)", "매도비율을 입력해주세요", prefill.get("rate")))
+    return blocks
+
+def trail_row_prefill(row: dict) -> dict:
+    return {
+        "stop": format_price_input(row["stop_price"]),
+        "action": format_price_input(row["action_price"]),
+        "exit": format_price_input(row["exit_price"]),
+        "rate": format_price_input(row["trail_plan"]) if row.get("trail_plan") is not None else "",
+    }
+
+def error_section(error) -> list:
+    return [section(f":warning: *입력 오류* : {error}")] if error else []
+
+def build_trail_register_blocks(m: str, c: str, prefill: Optional[dict] = None, error=None) -> list:
+    prefill = prefill or {}
+    today, _ = get_trail_days(m)
+    targets = get_trail_register_targets(c, m)
+    blocks = error_section(error) + [section(
+        f"*[{m}] [{c}] 추적등록* (영업일 {fmt_day(today)})\n"
+        f"보유종목(매매계획 홀딩·투자 제외) 중 대상상품을 선택하고 값을 입력하세요."
+    )]
+    if not targets:
+        return blocks + [section("추적등록 가능한 보유종목이 없습니다."), back_actions("cust", m=m, f="trail_register")]
+
+    def option(prd_nm: str, vol) -> dict:
+        return {"text": {"type": "plain_text", "text": f"{trail_prd(prd_nm)} (보유 {fmt_num(vol)})"[:75]}, "value": prd_nm}
+
+    prd_element = {
+        "type": "static_select",
+        "action_id": "trail_prd_nm",
+        "placeholder": {"type": "plain_text", "text": "대상상품을 선택해주세요"},
+        "options": [option(t["prd_nm"], t["hold_volume"]) for t in targets],
+    }
+    selected = next((t for t in targets if t["prd_nm"] == prefill.get("prd_nm")), None)
+    if selected:
+        prd_element["initial_option"] = option(selected["prd_nm"], selected["hold_volume"])
+
+    return blocks + [
+        {"type": "input", "block_id": "trail_prd_block", "element": prd_element, "label": {"type": "plain_text", "text": "대상상품"}},
+        *trail_value_inputs(TRAIL_REGISTER_ZERO, prefill),
+        actions([button(
+            "추적등록", "trail_register_exec", {"m": m, "c": c}, style="primary",
+            confirm=f"[{m}] [{c}] 선택한 상품의 추적정보를 등록합니다.",
+        )]),
+        back_actions("cust", m=m, f="trail_register"),
+    ]
+
+def build_trail_pick_blocks(m: str, c: str, f: str) -> list:
+    # 추적변경/재개/멈춤 대상 선택 : 오늘 영업일, 보유수량 존재, 종목별 최신 1건
+    trail_tps = TRAIL_PAUSED_TPS if f == "trail_resume" else TRAIL_ACTIVE_TPS
+    today, rows = get_trail_rows(c, m, trail_tps)
+    blocks = [section(
+        f"*[{m}] [{c}] {feature_title(f)}* (영업일 {fmt_day(today)})\n"
+        f"대상 추적상태: {', '.join(trail_tp_label(tp) for tp in trail_tps)}"
+    )]
+    if not rows:
+        blocks.append(section(f"{feature_title(f)} 대상이 없습니다."))
+    for i, r in enumerate(rows[:MAX_LIST_ITEMS]):
+        block = section(format_trail_row(r))
+        if f == "trail_pause":
+            block["accessory"] = button(
+                "멈춤", f"trail_pause_exec_{i}", {"m": m, "c": c, "p": r["prd_nm"]}, style="danger",
+                confirm=f"[{m}] [{c}] *{trail_prd(r['prd_nm'])}* 추적을 멈춥니다.",
+            )
+        else:
+            block["accessory"] = button("선택", f"go_trail_item_{i}", {"to": f"{f}_form", "m": m, "c": c, "p": r["prd_nm"]})
+        blocks.append(block)
+    blocks.append(back_actions("cust", m=m, f=f))
+    return blocks
+
+def build_trail_change_form_blocks(m: str, c: str, prd_nm: str, prefill: Optional[dict] = None, error=None) -> list:
+    today, row = get_trail_row(c, m, prd_nm, TRAIL_ACTIVE_TPS)
+    back = back_actions("trail_change", m=m, c=c)
+    if not row:
+        return error_section(error) + [section(f"*{trail_prd(prd_nm)}* 오늘({fmt_day(today)}) 추적변경 대상이 없습니다."), back]
+
+    keep_tp = row["trail_tp"] == "2"
+    return error_section(error) + [
+        section(
+            f"*[{m}] [{c}] 추적변경* (영업일 {fmt_day(today)})\n{format_trail_row(row)}\n"
+            f"추적상태: {trail_tp_label(row['trail_tp'])} → {trail_tp_label('2' if keep_tp else '1')}"
+            + (" (트레일링 중이므로 유지)" if keep_tp else "")
+        ),
+        *trail_value_inputs(TRAIL_CHANGE_ZERO, prefill or trail_row_prefill(row), suffix=f"|{prd_nm}"),
+        actions([button(
+            "추적변경", "trail_change_exec", {"m": m, "c": c, "p": prd_nm}, style="primary",
+            confirm=f"[{m}] [{c}] *{trail_prd(prd_nm)}* 추적정보를 변경합니다.",
+        )]),
+        back,
+    ]
+
+def build_trail_resume_form_blocks(m: str, c: str, prd_nm: str, prefill: Optional[dict] = None, error=None) -> list:
+    today, row = get_trail_row(c, m, prd_nm, TRAIL_PAUSED_TPS)
+    back = back_actions("trail_resume", m=m, c=c)
+    if not row:
+        return error_section(error) + [section(f"*{trail_prd(prd_nm)}* 오늘({fmt_day(today)}) 추적재개 대상이 없습니다."), back]
+
+    prefill = prefill or trail_row_prefill(row)
+
+    def option(tp: str) -> dict:
+        return {"text": {"type": "plain_text", "text": trail_tp_label(tp)}, "value": tp}
+
+    state_element = {
+        "type": "static_select",
+        "action_id": "trail_resume_tp",
+        "placeholder": {"type": "plain_text", "text": "추적상태를 선택해주세요"},
+        "options": [option(tp) for tp in TRAIL_RESUME_OPTIONS],
+    }
+    if prefill.get("trail_tp") in TRAIL_RESUME_OPTIONS:
+        state_element["initial_option"] = option(prefill["trail_tp"])
+
+    return error_section(error) + [
+        section(f"*[{m}] [{c}] 추적재개* (영업일 {fmt_day(today)})\n{format_trail_row(row)}"),
+        *trail_value_inputs(TRAIL_CHANGE_ZERO, prefill, suffix=f"|{prd_nm}", with_rate=False),
+        {"type": "input", "block_id": f"trail_resume_tp_block|{prd_nm}", "element": state_element, "label": {"type": "plain_text", "text": "추적상태"}},
+        actions([button(
+            "추적재개", "trail_resume_exec", {"m": m, "c": c, "p": prd_nm}, style="primary",
+            confirm=f"[{m}] [{c}] *{trail_prd(prd_nm)}* 추적을 재개합니다.",
+        )]),
+        back,
+    ]
+
+def build_trail_delete_blocks(m: str, c: str) -> list:
+    today, rows = get_trail_rows(c, m)
+    blocks = [section(f"*[{m}] [{c}] 추적삭제* (영업일 {fmt_day(today)})\n삭제 대상 추적정보: 총 {len(rows)}건")]
+    for r in rows[:MAX_LIST_ITEMS]:
+        blocks.append(section(format_trail_row(r)))
+    if len(rows) > MAX_LIST_ITEMS:
+        blocks.append(section(f"외 {len(rows) - MAX_LIST_ITEMS}건"))
+    if rows:
+        blocks.append(actions([button(
+            "추적삭제", "trail_delete_exec", {"m": m, "c": c}, style="danger",
+            confirm=f"[{m}] [{c}] 영업일 {fmt_day(today)} 추적정보 {len(rows)}건을 모두 삭제합니다.",
+        )]))
+    else:
+        blocks.append(section("삭제할 추적정보가 없습니다."))
+    blocks.append(back_actions("cust", m=m, f="trail_delete"))
+    return blocks
+
+def build_trail_query_blocks(m: str, c: str) -> list:
+    today, rows = get_trail_rows(c, m)
+    blocks = [section(f"*[{m}] [{c}] 추적조회* (영업일 {fmt_day(today)}) 총 {len(rows)}건")]
+    if not rows:
+        blocks.append(section("오늘 매매추적정보가 없습니다."))
+    for r in rows[:MAX_LIST_ITEMS]:
+        blocks.append(section(format_trail_row(r)))
+    if len(rows) > MAX_LIST_ITEMS:
+        blocks.append(section(f"외 {len(rows) - MAX_LIST_ITEMS}건"))
+    blocks.append(home_actions())
+    return blocks
+
+def build_trail_prepare_blocks(m: str, c: str) -> list:
+    result = trail_prepare(cust_nm=c, market_name=m)
+    lines = [
+        f"영업일 {fmt_day(result['trail_day'])} | 대상 보유종목 {result['target']}건 | 생성 {len(result['created'])}건 | 제외 {len(result['skipped'])}건",
+        f"> 생성: {', '.join(result['created']) or '-'}",
+        f"> 제외(오늘 추적정보 존재): {', '.join(result['skipped']) or '-'}",
+    ]
+    return build_result_blocks(f"[{m}] [{c}] 추적준비", "\n".join(lines))
+
 def render_screen(nav: dict, user_id: str) -> list:
     to, m, c = nav.get("to"), nav.get("m"), nav.get("c")
 
@@ -567,6 +839,24 @@ def render_screen(nav: dict, user_id: str) -> list:
         return build_order_close_form_blocks(m, c)
     if to == "order_close_result":
         return build_order_close_result_blocks(m, c, nav["s"], nav["e"], nav.get("page", 1))
+    if to == "trail_menu":
+        return build_feature_menu_blocks(m, "추적관리", TRAIL_FEATURES)
+    if to == "trail_state_menu":
+        return build_feature_menu_blocks(m, "추적상태", TRAIL_STATE_FEATURES, back_to="trail_menu")
+    if to == "trail_register":
+        return build_trail_register_blocks(m, c)
+    if to in ("trail_change", "trail_resume", "trail_pause"):
+        return build_trail_pick_blocks(m, c, to)
+    if to == "trail_change_form":
+        return build_trail_change_form_blocks(m, c, nav["p"])
+    if to == "trail_resume_form":
+        return build_trail_resume_form_blocks(m, c, nav["p"])
+    if to == "trail_delete":
+        return build_trail_delete_blocks(m, c)
+    if to == "trail_prepare":
+        return build_trail_prepare_blocks(m, c)
+    if to == "trail_query":
+        return build_trail_query_blocks(m, c)
     raise ValueError(f"알 수 없는 화면입니다: {to}")
 
 def get_tunnel_url(nickname: Optional[str] = None) -> str:
@@ -1174,6 +1464,95 @@ async def process_slack_interactivity(payload: dict):
                 "replace_original": True,
                 "text": f"*[{market_name}] 관심종목 등록/수정 중 오류 발생* : {e}"
             }
+
+    elif action_id == "trail_register_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 추적등록"
+        selected = get_state_value(payload, "trail_prd_nm", "selected_option")
+        raw = read_trail_inputs(payload)
+        prefill = {**raw, "prd_nm": selected["value"] if selected else None}
+
+        try:
+            if not selected:
+                raise ValueError("대상상품을 선택해주세요.")
+            stop, action, exit_ = resolve_trail_prices(market_name, selected["value"], raw, TRAIL_REGISTER_ZERO)
+            rate = parse_sell_rate(raw["rate"])
+        except Exception as e:
+            blocks = build_trail_register_blocks(market_name, cust_nm, prefill, error=e)
+        else:
+            try:
+                blocks = build_result_blocks(title, trail_register(cust_nm, market_name, selected["value"], stop, action, exit_, rate))
+            except Exception as e:
+                blocks = build_error_blocks(title, e)
+
+        message = {"response_type": "ephemeral", "replace_original": True, "text": title, "blocks": blocks}
+
+    elif action_id == "trail_change_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm, prd_nm = selection["m"], selection["c"], selection["p"]
+        title = f"[{market_name}] [{cust_nm}] 추적변경"
+        raw = read_trail_inputs(payload)
+
+        try:
+            stop, action, exit_ = resolve_trail_prices(market_name, prd_nm, raw, TRAIL_CHANGE_ZERO)
+            rate = parse_sell_rate(raw["rate"])
+        except Exception as e:
+            blocks = build_trail_change_form_blocks(market_name, cust_nm, prd_nm, raw, error=e)
+        else:
+            try:
+                blocks = build_result_blocks(title, trail_change(cust_nm, market_name, prd_nm, stop, action, exit_, rate))
+            except Exception as e:
+                blocks = build_error_blocks(title, e)
+
+        message = {"response_type": "ephemeral", "replace_original": True, "text": title, "blocks": blocks}
+
+    elif action_id == "trail_resume_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm, prd_nm = selection["m"], selection["c"], selection["p"]
+        title = f"[{market_name}] [{cust_nm}] 추적재개"
+        raw = read_trail_inputs(payload)
+        selected_tp = get_state_value(payload, "trail_resume_tp", "selected_option")
+        prefill = {**raw, "trail_tp": selected_tp["value"] if selected_tp else None}
+
+        try:
+            if not selected_tp:
+                raise ValueError("추적상태를 선택해주세요.")
+            stop, action, exit_ = resolve_trail_prices(market_name, prd_nm, raw, TRAIL_CHANGE_ZERO)
+        except Exception as e:
+            blocks = build_trail_resume_form_blocks(market_name, cust_nm, prd_nm, prefill, error=e)
+        else:
+            try:
+                blocks = build_result_blocks(title, trail_resume(cust_nm, market_name, prd_nm, stop, action, exit_, selected_tp["value"]))
+            except Exception as e:
+                blocks = build_error_blocks(title, e)
+
+        message = {"response_type": "ephemeral", "replace_original": True, "text": title, "blocks": blocks}
+
+    elif action_id.startswith("trail_pause_exec"):
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 추적멈춤"
+
+        try:
+            blocks = build_result_blocks(title, trail_pause(cust_nm, market_name, selection["p"]))
+        except Exception as e:
+            blocks = build_error_blocks(title, e)
+
+        message = {"response_type": "ephemeral", "replace_original": True, "text": title, "blocks": blocks}
+
+    elif action_id == "trail_delete_exec":
+        selection = json.loads(payload["actions"][0]["value"])
+        market_name, cust_nm = selection["m"], selection["c"]
+        title = f"[{market_name}] [{cust_nm}] 추적삭제"
+
+        try:
+            trail_day, deleted = trail_delete_today(cust_nm, market_name)
+            blocks = build_result_blocks(title, f"영업일 {fmt_day(trail_day)} 추적정보 *{deleted}건*을 삭제했습니다.")
+        except Exception as e:
+            blocks = build_error_blocks(title, e)
+
+        message = {"response_type": "ephemeral", "replace_original": True, "text": title, "blocks": blocks}
 
     elif action_id == "order_close_query":
         selection = json.loads(payload["actions"][0]["value"])
