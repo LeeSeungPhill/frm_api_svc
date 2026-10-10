@@ -538,7 +538,7 @@ def build_order_close_form_blocks(m: str, c: str, start: Optional[str] = None, e
         section(f"*[{m}] [{c}] 종료주문내역* 조회 기간을 선택하세요"),
         date_input("order_close_start_block", "order_close_start", "시작일", start),
         date_input("order_close_end_block", "order_close_end", "종료일", end),
-        actions([button("조회", "order_close_query", {"m": m, "c": c}, style="primary")]),
+        actions([button("조회", "order_close_query", {"m": m, "c": c, "d": {"start": start, "end": end}}, style="primary")]),
         back_actions("cust", m=m, f="order_close"),
     ]
 
@@ -609,6 +609,12 @@ def format_trail_row(r: dict) -> str:
     if r.get("trade_result"):
         lines.append(f"> 처리결과: {r['trade_result']}")
     return "\n".join(lines)
+
+def with_displayed(values: dict, displayed: Optional[dict]) -> dict:
+    # Slack 은 사용자가 수정하지 않은 입력항목의 초기값(initial_value/initial_date)을 state 로 보내지 않으므로
+    # 제출 버튼에 담아둔 화면 표시값으로 대체
+    displayed = displayed or {}
+    return {k: (v if v not in (None, "") else displayed.get(k)) for k, v in values.items()}
 
 def read_trail_inputs(payload: dict) -> dict:
     values = {key: get_state_value(payload, action_id) for key, action_id, _ in TRAIL_PRICE_FIELDS}
@@ -687,7 +693,7 @@ def build_trail_register_blocks(m: str, c: str, prefill: Optional[dict] = None, 
         {"type": "input", "block_id": "trail_prd_block", "element": prd_element, "label": {"type": "plain_text", "text": "대상상품"}},
         *trail_value_inputs(TRAIL_REGISTER_ZERO, prefill),
         actions([button(
-            "추적등록", "trail_register_exec", {"m": m, "c": c}, style="primary",
+            "추적등록", "trail_register_exec", {"m": m, "c": c, "d": prefill}, style="primary",
             confirm=f"[{m}] [{c}] 선택한 상품의 추적정보를 등록합니다.",
         )]),
         back_actions("cust", m=m, f="trail_register"),
@@ -723,15 +729,16 @@ def build_trail_change_form_blocks(m: str, c: str, prd_nm: str, prefill: Optiona
         return error_section(error) + [section(f"*{trail_prd(prd_nm)}* 오늘({fmt_day(today)}) 추적변경 대상이 없습니다."), back]
 
     keep_tp = row["trail_tp"] == "2"
+    displayed = prefill or trail_row_prefill(row)
     return error_section(error) + [
         section(
             f"*[{m}] [{c}] 추적변경* (영업일 {fmt_day(today)})\n{format_trail_row(row)}\n"
             f"추적상태: {trail_tp_label(row['trail_tp'])} → {trail_tp_label('2' if keep_tp else '1')}"
             + (" (트레일링 중이므로 유지)" if keep_tp else "")
         ),
-        *trail_value_inputs(TRAIL_CHANGE_ZERO, prefill or trail_row_prefill(row), suffix=f"|{prd_nm}"),
+        *trail_value_inputs(TRAIL_CHANGE_ZERO, displayed, suffix=f"|{prd_nm}"),
         actions([button(
-            "추적변경", "trail_change_exec", {"m": m, "c": c, "p": prd_nm}, style="primary",
+            "추적변경", "trail_change_exec", {"m": m, "c": c, "p": prd_nm, "d": displayed}, style="primary",
             confirm=f"[{m}] [{c}] *{trail_prd(prd_nm)}* 추적정보를 변경합니다.",
         )]),
         back,
@@ -762,7 +769,7 @@ def build_trail_resume_form_blocks(m: str, c: str, prd_nm: str, prefill: Optiona
         *trail_value_inputs(TRAIL_CHANGE_ZERO, prefill, suffix=f"|{prd_nm}", with_rate=False),
         {"type": "input", "block_id": f"trail_resume_tp_block|{prd_nm}", "element": state_element, "label": {"type": "plain_text", "text": "추적상태"}},
         actions([button(
-            "추적재개", "trail_resume_exec", {"m": m, "c": c, "p": prd_nm}, style="primary",
+            "추적재개", "trail_resume_exec", {"m": m, "c": c, "p": prd_nm, "d": prefill}, style="primary",
             confirm=f"[{m}] [{c}] *{trail_prd(prd_nm)}* 추적을 재개합니다.",
         )]),
         back,
@@ -1469,8 +1476,11 @@ async def process_slack_interactivity(payload: dict):
         selection = json.loads(payload["actions"][0]["value"])
         market_name, cust_nm = selection["m"], selection["c"]
         title = f"[{market_name}] [{cust_nm}] 추적등록"
+        displayed = selection.get("d") or {}
         selected = get_state_value(payload, "trail_prd_nm", "selected_option")
-        raw = read_trail_inputs(payload)
+        if not selected and displayed.get("prd_nm"):
+            selected = {"value": displayed["prd_nm"]}
+        raw = with_displayed(read_trail_inputs(payload), displayed)
         prefill = {**raw, "prd_nm": selected["value"] if selected else None}
 
         try:
@@ -1492,7 +1502,7 @@ async def process_slack_interactivity(payload: dict):
         selection = json.loads(payload["actions"][0]["value"])
         market_name, cust_nm, prd_nm = selection["m"], selection["c"], selection["p"]
         title = f"[{market_name}] [{cust_nm}] 추적변경"
-        raw = read_trail_inputs(payload)
+        raw = with_displayed(read_trail_inputs(payload), selection.get("d"))
 
         try:
             stop, action, exit_ = resolve_trail_prices(market_name, prd_nm, raw, TRAIL_CHANGE_ZERO)
@@ -1511,8 +1521,11 @@ async def process_slack_interactivity(payload: dict):
         selection = json.loads(payload["actions"][0]["value"])
         market_name, cust_nm, prd_nm = selection["m"], selection["c"], selection["p"]
         title = f"[{market_name}] [{cust_nm}] 추적재개"
-        raw = read_trail_inputs(payload)
+        displayed = selection.get("d") or {}
+        raw = with_displayed(read_trail_inputs(payload), displayed)
         selected_tp = get_state_value(payload, "trail_resume_tp", "selected_option")
+        if not selected_tp and displayed.get("trail_tp"):
+            selected_tp = {"value": displayed["trail_tp"]}
         prefill = {**raw, "trail_tp": selected_tp["value"] if selected_tp else None}
 
         try:
@@ -1557,8 +1570,11 @@ async def process_slack_interactivity(payload: dict):
     elif action_id == "order_close_query":
         selection = json.loads(payload["actions"][0]["value"])
         market_name, cust_nm = selection["m"], selection["c"]
-        start = get_state_value(payload, "order_close_start", "selected_date")
-        end = get_state_value(payload, "order_close_end", "selected_date")
+        dates = with_displayed({
+            "start": get_state_value(payload, "order_close_start", "selected_date"),
+            "end": get_state_value(payload, "order_close_end", "selected_date"),
+        }, selection.get("d"))
+        start, end = dates["start"], dates["end"]
 
         try:
             if not start or not end:
