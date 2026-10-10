@@ -533,7 +533,8 @@ def build_order_close_form_blocks(m: str, c: str, start: Optional[str] = None, e
     # 기간 선택 : 시작일(기본 현재일 기준 그해 1월 1일) ~ 종료일(기본 전일), 날짜 형식 YYYY-MM-DD
     today = datetime.today()
     start = start or today.replace(month=1, day=1).strftime("%Y-%m-%d")
-    end = end or (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    # end = end or (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    end = end or today.strftime("%Y-%m-%d")
     return [
         section(f"*[{m}] [{c}] 종료주문내역* 조회 기간을 선택하세요"),
         date_input("order_close_start_block", "order_close_start", "시작일", start),
