@@ -276,7 +276,7 @@ def back_actions(to: str, **ctx) -> dict:
 def home_actions() -> dict:
     return actions([button("처음으로", "go_home", {"to": "market"})])
 
-def text_input(block_id: str, action_id: str, label: str, placeholder: str, initial: Optional[str] = None) -> dict:
+def text_input(block_id: str, action_id: str, label: str, placeholder: str, initial: Optional[str] = None, optional: bool = False) -> dict:
     element = {
         "type": "plain_text_input",
         "action_id": action_id,
@@ -284,7 +284,10 @@ def text_input(block_id: str, action_id: str, label: str, placeholder: str, init
     }
     if initial not in (None, ""):
         element["initial_value"] = str(initial)
-    return {"type": "input", "block_id": block_id, "element": element, "label": {"type": "plain_text", "text": label}}
+    block = {"type": "input", "block_id": block_id, "element": element, "label": {"type": "plain_text", "text": label}}
+    if optional:
+        block["optional"] = True
+    return block
 
 def text_sections(text: str, chunk_size: int = 2900) -> list:
     # section 블록 text 는 최대 3000자이므로 줄 단위로 나누어 여러 블록으로 표시
@@ -646,13 +649,18 @@ def parse_sell_rate(value: Optional[str]) -> float:
         raise ValueError("매도비율은 1~100 사이로 입력해주세요.")
     return rate
 
-def trail_value_inputs(zero_rule: dict, prefill: dict, suffix: str = "", with_rate: bool = True) -> list:
+def trail_value_inputs(zero_rule: dict, prefill: dict, suffix: str = "", with_rate: bool = True, rate_optional: bool = False,
+                       rate_placeholder: str = "미입력시 기존 매도비율 유지") -> list:
     blocks = [
         text_input(f"{action_id}_block{suffix}", action_id, f"{label} ({zero_rule[key]}: 0)", f"{label}을(를) 입력해주세요", prefill.get(key))
         for key, action_id, label in TRAIL_PRICE_FIELDS
     ]
     if with_rate:
-        blocks.append(text_input(f"trail_sell_rate_block{suffix}", "trail_sell_rate", "매도비율 (1~100%)", "매도비율을 입력해주세요", prefill.get("rate")))
+        if rate_optional:
+            blocks.append(text_input(f"trail_sell_rate_block{suffix}", "trail_sell_rate", "매도비율 (1~100%, 선택)",
+                                     rate_placeholder, prefill.get("rate"), optional=True))
+        else:
+            blocks.append(text_input(f"trail_sell_rate_block{suffix}", "trail_sell_rate", "매도비율 (1~100%)", "매도비율을 입력해주세요", prefill.get("rate")))
     return blocks
 
 def trail_row_prefill(row: dict) -> dict:
@@ -692,7 +700,7 @@ def build_trail_register_blocks(m: str, c: str, prefill: Optional[dict] = None, 
 
     return blocks + [
         {"type": "input", "block_id": "trail_prd_block", "element": prd_element, "label": {"type": "plain_text", "text": "대상상품"}},
-        *trail_value_inputs(TRAIL_REGISTER_ZERO, prefill),
+        *trail_value_inputs(TRAIL_REGISTER_ZERO, prefill, rate_optional=True, rate_placeholder="미입력시 기본 매도비율(50%) 적용"),
         actions([button(
             "추적등록", "trail_register_exec", {"m": m, "c": c, "d": prefill}, style="primary",
             confirm=f"[{m}] [{c}] 선택한 상품의 추적정보를 등록합니다.",
@@ -737,7 +745,7 @@ def build_trail_change_form_blocks(m: str, c: str, prd_nm: str, prefill: Optiona
             f"추적상태: {trail_tp_label(row['trail_tp'])} → {trail_tp_label('2' if keep_tp else '1')}"
             + (" (트레일링 중이므로 유지)" if keep_tp else "")
         ),
-        *trail_value_inputs(TRAIL_CHANGE_ZERO, displayed, suffix=f"|{prd_nm}"),
+        *trail_value_inputs(TRAIL_CHANGE_ZERO, displayed, suffix=f"|{prd_nm}", rate_optional=True),
         actions([button(
             "추적변경", "trail_change_exec", {"m": m, "c": c, "p": prd_nm, "d": displayed}, style="primary",
             confirm=f"[{m}] [{c}] *{trail_prd(prd_nm)}* 추적정보를 변경합니다.",
@@ -1488,7 +1496,8 @@ async def process_slack_interactivity(payload: dict):
             if not selected:
                 raise ValueError("대상상품을 선택해주세요.")
             stop, action, exit_ = resolve_trail_prices(market_name, selected["value"], raw, TRAIL_REGISTER_ZERO)
-            rate = parse_sell_rate(raw["rate"])
+            # 매도비율 선택 입력 : 미입력시 미설정(추적 봇 기본 매도비율 적용)
+            rate = parse_sell_rate(raw["rate"]) if raw.get("rate") not in (None, "") else None
         except Exception as e:
             blocks = build_trail_register_blocks(market_name, cust_nm, prefill, error=e)
         else:
@@ -1507,7 +1516,8 @@ async def process_slack_interactivity(payload: dict):
 
         try:
             stop, action, exit_ = resolve_trail_prices(market_name, prd_nm, raw, TRAIL_CHANGE_ZERO)
-            rate = parse_sell_rate(raw["rate"])
+            # 매도비율 선택 입력 : 미입력시 기존 매도비율 유지
+            rate = parse_sell_rate(raw["rate"]) if raw.get("rate") not in (None, "") else None
         except Exception as e:
             blocks = build_trail_change_form_blocks(market_name, cust_nm, prd_nm, raw, error=e)
         else:

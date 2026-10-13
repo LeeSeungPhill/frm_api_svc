@@ -1912,7 +1912,7 @@ def get_trail_row(cust_nm: str, market_name: str, prd_nm: str, trail_tps: tuple)
     finally:
         db.close()
 
-def trail_register(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: float) -> str:
+def trail_register(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: Optional[float] = None) -> str:
     db = SessionLocal()
     label = _prd_label(prd_nm)
     try:
@@ -1963,7 +1963,8 @@ def trail_register(cust_nm: str, market_name: str, prd_nm: str, stop_price: floa
         return (
             f"*{label}* 추적등록 완료 (영업일 {today}, 추적대기)\n"
             f"> 기준가: {_fmt(basic_price)}, 보유량: {_fmt(basic_vol)}, 기준금액: {_fmt(holding['hold_amt'])}원\n"
-            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, 매도비율: {_fmt(trail_plan)}%\n"
+            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, "
+            f"매도비율: {_fmt(trail_plan) + '%' if trail_plan is not None else '미설정(기본 50%)'}\n"
             f"> 손실금액: {_fmt(loss_amt)}원"
         )
     except Exception:
@@ -1972,8 +1973,9 @@ def trail_register(cust_nm: str, market_name: str, prd_nm: str, stop_price: floa
     finally:
         db.close()
 
-def trail_change(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: float) -> str:
+def trail_change(cust_nm: str, market_name: str, prd_nm: str, stop_price: float, action_price: float, exit_price: float, trail_plan: Optional[float] = None) -> str:
     # 추적변경 : 추적상태는 1(추적대기)로 변경하되 2(목표가 돌파 후 트레일링)는 유지, trail_dtm 현재시각 갱신
+    # 매도비율(trail_plan) 미입력(None)시 기존 값 유지
     db = SessionLocal()
     label = _prd_label(prd_nm)
     try:
@@ -1987,22 +1989,24 @@ def trail_change(cust_nm: str, market_name: str, prd_nm: str, stop_price: float,
         cleared = _clear_same_state_rows(db, cust_num, market_name, prd_nm, today, new_tp, row['id'])
         loss_amt = int((float(row['basic_price']) - stop_price) * float(row['basic_vol']))
 
-        db.execute(text(f"""
+        saved_plan = db.execute(text(f"""
             UPDATE bit_trading_trail SET
                 stop_price = :stop_price, action_price = :action_price, exit_price = :exit_price,
-                trail_plan = :trail_plan, loss_amt = :loss_amt, trail_tp = :trail_tp, trail_dtm = :trail_dtm,
+                trail_plan = COALESCE(:trail_plan, trail_plan), loss_amt = :loss_amt, trail_tp = :trail_tp, trail_dtm = :trail_dtm,
                 {_wait_state_reset_sql()}, chgr_id = :user_id, chg_date = :now
             WHERE id = :id
+            RETURNING trail_plan
         """), {
             "stop_price": stop_price, "action_price": action_price, "exit_price": exit_price, "trail_plan": trail_plan,
             "loss_amt": loss_amt, "trail_tp": new_tp, "trail_dtm": datetime.now().strftime("%H%M%S"),
             "user_id": user_id, "now": datetime.now(), "id": row['id'],
-        })
+        }).scalar()
         db.commit()
 
         return (
             f"*{label}* 추적변경 완료 (추적상태: {row['trail_tp']} → {new_tp})\n"
-            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, 매도비율: {_fmt(trail_plan)}%"
+            f"> 이탈가: {_fmt(stop_price)}, 수행가: {_fmt(action_price)}, 최종이탈가: {_fmt(exit_price)}, "
+            f"매도비율: {_fmt(saved_plan) + '%' if saved_plan is not None else '미설정(기본 50%)'}"
             + (f"\n> 같은 상태의 기존 추적정보 {cleared}건 정리" if cleared else "")
         )
     except Exception:
