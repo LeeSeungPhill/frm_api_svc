@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 import asyncio
 import json
 import requests
-from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update, get_cust_list, get_ticker, calc_buy_plan, get_sell_holding_list, get_trail_days, get_trail_rows, get_trail_row, get_trail_register_targets, trail_register, trail_change, trail_resume, trail_pause, trail_delete_today, trail_prepare, TRAIL_ACTIVE_TPS, TRAIL_PAUSED_TPS
+from routers.trade_proc import get_balance, buy_proc, sell_proc, get_order_open, order_update, order_cancel, get_order_close, get_interest_list, interest_update, get_holding_prd_list, get_holding_prices, holding_update, get_cust_markets, get_ticker, calc_buy_plan, get_sell_holding_list, get_trail_days, get_trail_rows, get_trail_row, get_trail_register_targets, trail_register, trail_change, trail_resume, trail_pause, trail_delete_today, trail_prepare, TRAIL_ACTIVE_TPS, TRAIL_PAUSED_TPS
 from typing import List, Tuple, Union, Optional
 import re
 import base64
@@ -188,7 +188,7 @@ def build_holding_update_blocks(
                 }
             ]
         },
-        back_actions("cust", m=market_name, f="holding_update")
+        back_to_menu("holding_update", market_name, cust_nm)
     ]
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -273,8 +273,12 @@ def button(text: str, action_id: str, value: dict, style: Optional[str] = None, 
 def back_actions(to: str, **ctx) -> dict:
     return actions([button("⬅ 이전", "go_back", {"to": to, **ctx})])
 
+def back_to_menu(f: str, m: str, c: str) -> dict:
+    # 기능 화면의 "이전" : 해당 기능이 속한 메뉴로 이동
+    return back_actions(PARENT_MENUS[f], m=m, c=c)
+
 def home_actions() -> dict:
-    return actions([button("처음으로", "go_home", {"to": "market"})])
+    return actions([button("처음으로", "go_home", {"to": "home"})])
 
 def text_input(block_id: str, action_id: str, label: str, placeholder: str, initial: Optional[str] = None, optional: bool = False) -> dict:
     element = {
@@ -379,54 +383,54 @@ def build_result_blocks(title: str, result) -> list:
 def build_error_blocks(title: str, error) -> list:
     return [section(f"*{title} 중 오류 발생* : {error}"), home_actions()]
 
-def build_market_blocks(user_id: str) -> list:
+def build_home_blocks(user_id: str) -> list:
+    # 첫 화면 : 닉네임(고객) 선택
+    cust_markets = get_cust_markets()
+    blocks = [section(f"안녕하세요 <@{user_id}>님! 닉네임을 선택하세요")]
+    if cust_markets:
+        blocks.append(actions([button(c, f"go_home_cust_{i}", {"to": "market", "c": c}) for i, c in enumerate(cust_markets)]))
+    else:
+        blocks.append(section("등록된 고객이 없습니다."))
+    return blocks
+
+def build_market_blocks(c: str) -> list:
+    # 선택한 닉네임이 등록된 거래소만 표시
+    markets = get_cust_markets().get(c, [])
+    blocks = [section(f"*[{c}]* 어느 거래소를 선택하시겠습니까?")]
+    if markets:
+        blocks.append(actions([button(m, f"go_market_{m.lower()}", {"to": "main", "m": m, "c": c}) for m in markets]))
+    else:
+        blocks.append(section("등록된 거래소가 없습니다."))
+    blocks.append(back_actions("home"))
+    return blocks
+
+def build_main_menu_blocks(m: str, c: str) -> list:
     return [
-        section(f"안녕하세요 <@{user_id}>님! 어느 거래소를 선택하시겠습니까?"),
+        section(f"*[{m}] [{c}]* 메뉴를 선택하세요"),
         actions([
-            button("UPBIT", "go_market_upbit", {"to": "main", "m": "UPBIT"}),
-            button("BITHUMB", "go_market_bithumb", {"to": "main", "m": "BITHUMB"}),
+            button("보유종목", "go_holding_menu", {"to": "holding_menu", "m": m, "c": c}),
+            button("매매관리", "go_trade_menu", {"to": "trade_menu", "m": m, "c": c}),
+            button("추적관리", "go_trail_menu", {"to": "trail_menu", "m": m, "c": c}),
         ]),
+        back_actions("market", c=c),
     ]
 
-def build_main_menu_blocks(m: str) -> list:
-    return [
-        section(f"*[{m}]* 메뉴를 선택하세요"),
-        actions([
-            button("보유종목", "go_holding_menu", {"to": "holding_menu", "m": m}),
-            button("매매관리", "go_trade_menu", {"to": "trade_menu", "m": m}),
-            button("추적관리", "go_trail_menu", {"to": "trail_menu", "m": m}),
-        ]),
-        back_actions("market"),
-    ]
-
-def build_feature_menu_blocks(m: str, title: str, features: list, back_to: str = "main") -> list:
+def build_feature_menu_blocks(m: str, c: str, title: str, features: list, back_to: str = "main") -> list:
     features = [f for f in features if m == "UPBIT" or f not in UPBIT_ONLY_FEATURES]
 
     def feature_nav(f: str) -> dict:
-        if f in SUBMENU_FEATURES:
-            return {"to": SUBMENU_FEATURES[f], "m": m}
-        return {"to": "cust", "m": m, "f": f}
+        return {"to": SUBMENU_FEATURES.get(f, f), "m": m, "c": c}
 
     return [
-        section(f"*[{m}] {title}* 처리를 선택하세요"),
+        section(f"*[{m}] [{c}] {title}* 처리를 선택하세요"),
         actions([button(FEATURE_LABELS[f], f"go_feature_{f}", feature_nav(f)) for f in features]),
-        back_actions(back_to, m=m),
+        back_actions(back_to, m=m, c=c),
     ]
-
-def build_cust_blocks(m: str, f: str) -> list:
-    cust_list = get_cust_list(m)
-    blocks = [section(f"*[{m}] {feature_title(f)}* 고객을 선택하세요")]
-    if cust_list:
-        blocks.append(actions([button(c, f"go_cust_{i}", {"to": f, "m": m, "c": c}) for i, c in enumerate(cust_list)]))
-    else:
-        blocks.append(section("등록된 고객이 없습니다."))
-    blocks.append(back_actions(PARENT_MENUS[f], m=m))
-    return blocks
 
 def build_holding_update_entry_blocks(m: str, c: str) -> list:
     holding_prd_list = get_holding_prd_list(cust_nm=c, market_name=m)
     if not holding_prd_list:
-        return [section(f"*[{m}] [{c}]* 보유중인 종목이 없습니다."), back_actions("cust", m=m, f="holding_update")]
+        return [section(f"*[{m}] [{c}]* 보유중인 종목이 없습니다."), back_to_menu("holding_update", m, c)]
     return build_holding_update_blocks(m, c, holding_prd_list)
 
 def build_buy_form_blocks(m: str, c: str, prefill: Optional[dict] = None) -> list:
@@ -439,7 +443,7 @@ def build_buy_form_blocks(m: str, c: str, prefill: Optional[dict] = None) -> lis
         text_input("buy_amt_block", "buy_amt", "매수금액", "매수금액을 입력해주세요", p.get("buy_amt")),
         text_input("buy_loss_amt_block", "buy_loss_amt", "손절금액", "손절금액을 입력해주세요", p.get("loss_amt")),
         actions([button("계산", "buy_calc", {"m": m, "c": c}, style="primary")]),
-        back_actions("cust", m=m, f="buy"),
+        back_to_menu("buy", m, c),
     ]
 
 def build_buy_preview_blocks(m: str, c: str, inputs: dict, buy_price: float, loss_price: float, plan: dict,
@@ -470,7 +474,7 @@ def build_buy_preview_blocks(m: str, c: str, inputs: dict, buy_price: float, los
         {"type": "divider"},
         section(plan_text("매수금액 기준", plan["amt_based"])),
         actions(order_buttons),
-        back_actions("cust", m=m, f="buy"),
+        back_to_menu("buy", m, c),
     ]
 
 def build_sell_list_blocks(m: str, c: str) -> list:
@@ -482,7 +486,7 @@ def build_sell_list_blocks(m: str, c: str) -> list:
         block = section(f"*{h['prd_nm']}*\n보유수량: {fmt_num(h['volume'])} | 손수익율: {h['loss_profit_rate']}% | 현재금액: {fmt_num(h['current_amt'])}원")
         block["accessory"] = button("선택", f"go_sell_item_{i}", {"to": "sell_form", "m": m, "c": c, "h": h})
         blocks.append(block)
-    blocks.append(back_actions("cust", m=m, f="sell"))
+    blocks.append(back_to_menu("sell", m, c))
     return blocks
 
 def build_sell_form_blocks(m: str, c: str, h: dict) -> list:
@@ -513,7 +517,7 @@ def build_order_list_blocks(m: str, c: str, f: str) -> list:
         block = section(order_text)
         block["accessory"] = button("선택", f"go_order_item_{i}", {"to": "order_form", "m": m, "c": c, "f": f, "o": order_no, "s": order_text})
         blocks.append(block)
-    blocks.append(back_actions("cust", m=m, f=f))
+    blocks.append(back_to_menu(f, m, c))
     return blocks
 
 def build_order_form_blocks(m: str, c: str, f: str, order_no: str, order_text: str) -> list:
@@ -543,7 +547,7 @@ def build_order_close_form_blocks(m: str, c: str, start: Optional[str] = None, e
         date_input("order_close_start_block", "order_close_start", "시작일", start),
         date_input("order_close_end_block", "order_close_end", "종료일", end),
         actions([button("조회", "order_close_query", {"m": m, "c": c, "d": {"start": start, "end": end}}, style="primary")]),
-        back_actions("cust", m=m, f="order_close"),
+        back_to_menu("order_close", m, c),
     ]
 
 def build_order_close_result_blocks(m: str, c: str, start: str, end: str, page: int = 1) -> list:
@@ -577,7 +581,7 @@ def build_order_close_result_blocks(m: str, c: str, start: str, end: str, page: 
         page_buttons.append(button("⬅ 이전 페이지", "go_page_prev", {**nav, "page": page - 1}))
     if page < total_pages:
         page_buttons.append(button("다음 페이지 ➡", "go_page_next", {**nav, "page": page + 1}))
-    blocks.append(actions(page_buttons + [button("처음으로", "go_home", {"to": "market"})]))
+    blocks.append(actions(page_buttons + [button("처음으로", "go_home", {"to": "home"})]))
     return blocks
 
 # ── 추적관리 ─────────────────────────────────────────────────────────────────
@@ -683,7 +687,7 @@ def build_trail_register_blocks(m: str, c: str, prefill: Optional[dict] = None, 
         f"보유종목(매매계획 홀딩·투자 제외) 중 대상상품을 선택하고 값을 입력하세요."
     )]
     if not targets:
-        return blocks + [section("추적등록 가능한 보유종목이 없습니다."), back_actions("cust", m=m, f="trail_register")]
+        return blocks + [section("추적등록 가능한 보유종목이 없습니다."), back_to_menu("trail_register", m, c)]
 
     def option(prd_nm: str, vol) -> dict:
         return {"text": {"type": "plain_text", "text": f"{trail_prd(prd_nm)} (보유 {fmt_num(vol)})"[:75]}, "value": prd_nm}
@@ -705,7 +709,7 @@ def build_trail_register_blocks(m: str, c: str, prefill: Optional[dict] = None, 
             "추적등록", "trail_register_exec", {"m": m, "c": c, "d": prefill}, style="primary",
             confirm=f"[{m}] [{c}] 선택한 상품의 추적정보를 등록합니다.",
         )]),
-        back_actions("cust", m=m, f="trail_register"),
+        back_to_menu("trail_register", m, c),
     ]
 
 def build_trail_pick_blocks(m: str, c: str, f: str) -> list:
@@ -728,7 +732,7 @@ def build_trail_pick_blocks(m: str, c: str, f: str) -> list:
         else:
             block["accessory"] = button("선택", f"go_trail_item_{i}", {"to": f"{f}_form", "m": m, "c": c, "p": r["prd_nm"]})
         blocks.append(block)
-    blocks.append(back_actions("cust", m=m, f=f))
+    blocks.append(back_to_menu(f, m, c))
     return blocks
 
 def build_trail_change_form_blocks(m: str, c: str, prd_nm: str, prefill: Optional[dict] = None, error=None) -> list:
@@ -798,7 +802,7 @@ def build_trail_delete_blocks(m: str, c: str) -> list:
         )]))
     else:
         blocks.append(section("삭제할 추적정보가 없습니다."))
-    blocks.append(back_actions("cust", m=m, f="trail_delete"))
+    blocks.append(back_to_menu("trail_delete", m, c))
     return blocks
 
 def build_trail_query_blocks(m: str, c: str) -> list:
@@ -825,16 +829,16 @@ def build_trail_prepare_blocks(m: str, c: str) -> list:
 def render_screen(nav: dict, user_id: str) -> list:
     to, m, c = nav.get("to"), nav.get("m"), nav.get("c")
 
+    if to == "home":
+        return build_home_blocks(user_id)
     if to == "market":
-        return build_market_blocks(user_id)
+        return build_market_blocks(c)
     if to == "main":
-        return build_main_menu_blocks(m)
+        return build_main_menu_blocks(m, c)
     if to == "holding_menu":
-        return build_feature_menu_blocks(m, "보유종목", HOLDING_FEATURES)
+        return build_feature_menu_blocks(m, c, "보유종목", HOLDING_FEATURES)
     if to == "trade_menu":
-        return build_feature_menu_blocks(m, "매매관리", TRADE_FEATURES)
-    if to == "cust":
-        return build_cust_blocks(m, nav["f"])
+        return build_feature_menu_blocks(m, c, "매매관리", TRADE_FEATURES)
     if to == "holding_list":
         return build_result_blocks(f"[{m}] [{c}] 보유종목", get_balance(cust_nm=c, market_name=m))
     if to == "holding_update":
@@ -856,9 +860,9 @@ def render_screen(nav: dict, user_id: str) -> list:
     if to == "order_close_result":
         return build_order_close_result_blocks(m, c, nav["s"], nav["e"], nav.get("page", 1))
     if to == "trail_menu":
-        return build_feature_menu_blocks(m, "추적관리", TRAIL_FEATURES)
+        return build_feature_menu_blocks(m, c, "추적관리", TRAIL_FEATURES)
     if to == "trail_state_menu":
-        return build_feature_menu_blocks(m, "추적상태", TRAIL_STATE_FEATURES, back_to="trail_menu")
+        return build_feature_menu_blocks(m, c, "추적상태", TRAIL_STATE_FEATURES, back_to="trail_menu")
     if to == "trail_register":
         return build_trail_register_blocks(m, c)
     if to in ("trail_change", "trail_resume", "trail_pause"):
@@ -894,6 +898,20 @@ def get_tunnel_url(nickname: Optional[str] = None) -> str:
 
     return result
 
+# /info 닉네임 버튼 목록 : 접속 화면(balance_info/universe_balance_info.py)의 kis_nickname 목록과 동일하게 유지
+INFO_NICKNAMES = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
+
+def build_info_url_message(nickname: Optional[str] = None) -> dict:
+    return {
+        "response_type": "in_channel",
+        "text": f"🌐 Universe Balance Info 접속 URL{f' ({nickname})' if nickname else ''}: {get_tunnel_url(nickname)}"
+    }
+
+def build_info_nickname_blocks() -> list:
+    elements = [button(n, f"info_nickname_{i}", {"n": n}) for i, n in enumerate(INFO_NICKNAMES)]
+    # actions 블록당 버튼은 최대 25개
+    return [section("접속할 닉네임을 선택하세요")] + [actions(elements[i:i + 25]) for i in range(0, len(elements), 25)]
+
 # Slash Command 처리
 @app.post("/slack/command")
 async def slack_command(request: Request):
@@ -908,11 +926,14 @@ async def slack_command(request: Request):
 
     if command == "/info":
         nickname = text.strip() if text else None
-        result = get_tunnel_url(nickname)
+        # /info 닉네임 : 바로 접속 URL 표시, /info : 닉네임 선택 버튼 표시
+        if nickname:
+            return JSONResponse(build_info_url_message(nickname))
 
         return JSONResponse({
-            "response_type": "in_channel",
-            "text": f"🌐 Universe Balance Info 접속 URL: {result}"
+            "response_type": "ephemeral",
+            "text": "접속할 닉네임을 선택하세요",
+            "blocks": build_info_nickname_blocks()
         })
     
     else:
@@ -920,7 +941,7 @@ async def slack_command(request: Request):
         return JSONResponse(
             content={
                 "response_type": "ephemeral",
-                "blocks": build_market_blocks(user_id)
+                "blocks": build_home_blocks(user_id)
             }
         )
 
@@ -966,6 +987,16 @@ async def process_slack_interactivity(payload: dict):
             "text": "메뉴",
             "blocks": blocks
         }
+
+    elif action_id.startswith("info_nickname_"):
+        # /info 닉네임 선택 : /info 닉네임 과 동일하게 채널에 접속 URL 게시 후 선택 버튼 메시지 삭제
+        nickname = json.loads(payload["actions"][0]["value"])["n"]
+        try:
+            response = requests.post(response_url, json={**build_info_url_message(nickname), "replace_original": False})
+            response.raise_for_status()
+            message = {"delete_original": True}
+        except requests.exceptions.RequestException as e:
+            message = {"response_type": "ephemeral", "replace_original": True, "text": f"접속 URL 전송 실패: {e}"}
 
     elif action_id == "buy_calc":
         selection = json.loads(payload["actions"][0]["value"])

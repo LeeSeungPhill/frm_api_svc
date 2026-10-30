@@ -31,16 +31,19 @@ def to_plain_str(value) -> str:
     # str(float)는 소량(예: 8.8e-05)을 지수표기로 만들어 거래소 API가 거부하므로 고정소수점 문자열로 변환
     return format(Decimal(str(value)), 'f')
 
-def get_cust_list(market_name: str) -> List[str]:
+def get_cust_markets() -> dict:
+    # 닉네임(고객명)별 등록 거래소 {cust_nm: [market_name, ...]} (고객번호 순, 거래소는 UPBIT → BITHUMB 순)
     db = SessionLocal()
     try:
-        SELECT_CUST_LIST = """
-            SELECT cust_nm
+        SELECT_CUST_MARKETS = """
+            SELECT cust_nm, market_name
             FROM cust_mng
-            WHERE market_name = :market_name
-            ORDER BY cust_num
+            ORDER BY MIN(cust_num) OVER (PARTITION BY cust_nm), CASE market_name WHEN 'UPBIT' THEN 0 ELSE 1 END
         """
-        return [row[0] for row in db.execute(text(SELECT_CUST_LIST), {"market_name": market_name}).fetchall()]
+        cust_markets = {}
+        for cust_nm, market_name in db.execute(text(SELECT_CUST_MARKETS)).fetchall():
+            cust_markets.setdefault(cust_nm, []).append(market_name)
+        return cust_markets
     finally:
         db.close()
 
