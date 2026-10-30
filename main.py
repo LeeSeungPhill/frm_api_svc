@@ -879,24 +879,30 @@ def render_screen(nav: dict, user_id: str) -> list:
         return build_trail_query_blocks(m, c)
     raise ValueError(f"알 수 없는 화면입니다: {to}")
 
-def get_tunnel_url(nickname: Optional[str] = None) -> str:
+def read_tunnel_url(nickname: Optional[str] = None) -> str:
     """
-    cloudflared 임시 접속 URL을 조회하고, 닉네임이 주어지면 쿼리 파라미터로 덧붙인다.
+    cloudflared 임시 접속 URL을 조회하고, 닉네임이 주어지면 쿼리 파라미터로 덧붙인다. 조회 불가시 RuntimeError.
     """
     url_file = "/home/terra/log/tunnel/universe_tunnel_url.txt"
     try:
         with open(url_file, "r") as f:
             result = f.read().strip()
-        if not result:
-            return "현재 cloudflared 임시 URL을 찾을 수 없습니다."
     except Exception as e:
-        return f"URL 조회 실패: {e}"
+        raise RuntimeError(f"URL 조회 실패: {e}")
+    if not result:
+        raise RuntimeError("현재 cloudflared 임시 URL을 찾을 수 없습니다.")
 
     if nickname:
         separator = "&" if "?" in result else "?"
         result = f"{result}{separator}nickname={quote(nickname)}"
 
     return result
+
+def get_tunnel_url(nickname: Optional[str] = None) -> str:
+    try:
+        return read_tunnel_url(nickname)
+    except RuntimeError as e:
+        return str(e)
 
 # /info 닉네임 버튼 목록 : 접속 화면(balance_info/universe_balance_info.py)의 kis_nickname 목록과 동일하게 유지
 INFO_NICKNAMES = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
@@ -908,9 +914,20 @@ def build_info_url_message(nickname: Optional[str] = None) -> dict:
     }
 
 def build_info_nickname_blocks() -> list:
-    elements = [button(n, f"info_nickname_{i}", {"n": n}) for i, n in enumerate(INFO_NICKNAMES)]
+    # 닉네임 버튼은 링크 버튼 : 클릭시 브라우저에서 해당 닉네임의 접속 URL 이 바로 열림
+    try:
+        urls = {n: read_tunnel_url(n) for n in INFO_NICKNAMES}
+    except RuntimeError as e:
+        return [section(f"*Universe Balance Info* 접속 URL을 만들 수 없습니다 : {e}")]
+
+    elements = []
+    for i, n in enumerate(INFO_NICKNAMES):
+        element = button(n, f"info_nickname_{i}", {"n": n})
+        element["url"] = urls[n]
+        elements.append(element)
     # actions 블록당 버튼은 최대 25개
-    return [section("접속할 닉네임을 선택하세요")] + [actions(elements[i:i + 25]) for i in range(0, len(elements), 25)]
+    return [section("🌐 *Universe Balance Info* 접속할 닉네임을 선택하세요 (선택시 브라우저에서 열림)")] + \
+        [actions(elements[i:i + 25]) for i in range(0, len(elements), 25)]
 
 # Slash Command 처리
 @app.post("/slack/command")
@@ -989,14 +1006,13 @@ async def process_slack_interactivity(payload: dict):
         }
 
     elif action_id.startswith("info_nickname_"):
-        # /info 닉네임 선택 : /info 닉네임 과 동일하게 채널에 접속 URL 게시 후 선택 버튼 메시지 삭제
-        nickname = json.loads(payload["actions"][0]["value"])["n"]
-        try:
-            response = requests.post(response_url, json={**build_info_url_message(nickname), "replace_original": False})
-            response.raise_for_status()
-            message = {"delete_original": True}
-        except requests.exceptions.RequestException as e:
-            message = {"response_type": "ephemeral", "replace_original": True, "text": f"접속 URL 전송 실패: {e}"}
+        # /info 닉네임 선택 : 링크 버튼이라 브라우저는 Slack 이 바로 열고, 여기서는 최신 접속 URL 로 닉네임 버튼을 다시 표시
+        message = {
+            "response_type": "ephemeral",
+            "replace_original": True,
+            "text": "접속할 닉네임을 선택하세요",
+            "blocks": build_info_nickname_blocks()
+        }
 
     elif action_id == "buy_calc":
         selection = json.loads(payload["actions"][0]["value"])
