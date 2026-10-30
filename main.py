@@ -898,31 +898,21 @@ def read_tunnel_url(nickname: Optional[str] = None) -> str:
 
     return result
 
-def get_tunnel_url(nickname: Optional[str] = None) -> str:
-    try:
-        return read_tunnel_url(nickname)
-    except RuntimeError as e:
-        return str(e)
-
 # /info 닉네임 버튼 목록 : 접속 화면(balance_info/universe_balance_info.py)의 kis_nickname 목록과 동일하게 유지
 INFO_NICKNAMES = ['phills2', 'chichipa', 'phills75', 'yh480825', 'phills13', 'phills15', 'mamalong', 'honeylong', 'worry106']
 
-def build_info_url_message(nickname: Optional[str] = None) -> dict:
-    return {
-        "response_type": "in_channel",
-        "text": f"🌐 Universe Balance Info 접속 URL{f' ({nickname})' if nickname else ''}: {get_tunnel_url(nickname)}"
-    }
-
-def build_info_nickname_blocks() -> list:
+def build_info_nickname_blocks(nicknames: Optional[list] = None) -> list:
     # 닉네임 버튼은 링크 버튼 : 클릭시 브라우저에서 해당 닉네임의 접속 URL 이 바로 열림
+    nicknames = nicknames or INFO_NICKNAMES
     try:
-        urls = {n: read_tunnel_url(n) for n in INFO_NICKNAMES}
+        urls = {n: read_tunnel_url(n) for n in nicknames}
     except RuntimeError as e:
         return [section(f"*Universe Balance Info* 접속 URL을 만들 수 없습니다 : {e}")]
 
     elements = []
-    for i, n in enumerate(INFO_NICKNAMES):
-        element = button(n, f"info_nickname_{i}", {"n": n})
+    for i, n in enumerate(nicknames):
+        # 클릭 후 다시 표시할 때 같은 닉네임 목록을 유지하도록 목록을 함께 저장
+        element = button(n, f"info_nickname_{i}", {"n": n, "l": nicknames})
         element["url"] = urls[n]
         elements.append(element)
     # actions 블록당 버튼은 최대 25개
@@ -942,17 +932,19 @@ async def slack_command(request: Request):
     user_id = form.get("user_id")
 
     if command == "/info":
+        # /info : 전체 닉네임 버튼, /info 닉네임 : 해당 닉네임 버튼만 표시
         nickname = text.strip() if text else None
-        # /info 닉네임 : 바로 접속 URL 표시, /info : 닉네임 선택 버튼 표시
-        if nickname:
-            return JSONResponse(build_info_url_message(nickname))
+        if nickname and nickname not in INFO_NICKNAMES:
+            blocks = [section(f"*{nickname}* 은(는) 등록된 닉네임이 아닙니다.")] + build_info_nickname_blocks()
+        else:
+            blocks = build_info_nickname_blocks([nickname] if nickname else None)
 
         return JSONResponse({
             "response_type": "ephemeral",
             "text": "접속할 닉네임을 선택하세요",
-            "blocks": build_info_nickname_blocks()
+            "blocks": blocks
         })
-    
+
     else:
         # Slack으로 인터랙티브 버튼 리턴
         return JSONResponse(
@@ -1006,12 +998,13 @@ async def process_slack_interactivity(payload: dict):
         }
 
     elif action_id.startswith("info_nickname_"):
-        # /info 닉네임 선택 : 링크 버튼이라 브라우저는 Slack 이 바로 열고, 여기서는 최신 접속 URL 로 닉네임 버튼을 다시 표시
+        # /info 닉네임 선택 : 링크 버튼이라 브라우저는 Slack 이 바로 열고, 여기서는 최신 접속 URL 로 같은 닉네임 버튼을 다시 표시
+        shown = json.loads(payload["actions"][0]["value"]).get("l")
         message = {
             "response_type": "ephemeral",
             "replace_original": True,
             "text": "접속할 닉네임을 선택하세요",
-            "blocks": build_info_nickname_blocks()
+            "blocks": build_info_nickname_blocks(shown)
         }
 
     elif action_id == "buy_calc":
